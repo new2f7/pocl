@@ -211,7 +211,7 @@ get_wg_index_range (kernel_run_command *k, unsigned *start_index,
     limit = scaled_max_wgs;
 
   // divide two integers rounding up, i.e. ceil(k->remaining_wgs/num_threads)
-  const unsigned wgs_per_thread = (1 + (k->remaining_wgs - 1) / num_threads);
+  const unsigned wgs_per_thread = (1 + ((k->remaining_wgs + k->wgs_dealt) - 1) / num_threads);
   max_wgs = min (limit, wgs_per_thread);
   max_wgs = min (max_wgs, k->remaining_wgs);
   assert (max_wgs > 0);
