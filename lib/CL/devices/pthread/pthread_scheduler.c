@@ -40,6 +40,7 @@
 #include "pocl_util.h"
 #include "common.h"
 #include "pocl_mem_management.h"
+#include "pocl_runtime_config.h"
 
 static void* pocl_pthread_driver_thread (void *p);
 
@@ -188,8 +189,10 @@ get_wg_index_range (kernel_run_command *k, unsigned *start_index,
 {
   const unsigned scaled_max_wgs = POCL_PTHREAD_MAX_WGS * num_threads;
   const unsigned scaled_min_wgs = POCL_PTHREAD_MIN_WGS * num_threads;
+  // do environment calls before acquiring lock, TODO: read at scheduler initialization
+  const int force_wgs_per_thread_bool = pocl_is_option_set("POCL_PTHREAD_FORCE_WGS_PER_THREAD");
+  const unsigned force_wgs_per_thread_value = pocl_get_int_option("POCL_PTHREAD_FORCE_WGS_PER_THREAD", 1);
 
-  unsigned limit;
   unsigned max_wgs;
   POCL_FAST_LOCK (k->lock);
   if (k->remaining_wgs == 0)
@@ -198,21 +201,30 @@ get_wg_index_range (kernel_run_command *k, unsigned *start_index,
       return 0;
     }
 
-  /* If the work is comprised of huge number of WGs of small WIs,
-   * then get_wg_index_range() becomes a problem on manycore CPUs
-   * because lock contention on k->lock.
-   *
-   * If we have enough workgroups, scale up the requests linearly by
-   * num_threads, otherwise fallback to smaller workgroups.
-   */
-  if (k->remaining_wgs <= (scaled_max_wgs * num_threads))
-    limit = scaled_min_wgs;
+  if(force_wgs_per_thread_bool)
+    {
+      max_wgs = force_wgs_per_thread_value;
+    }
   else
-    limit = scaled_max_wgs;
+    {
+      /* If the work is comprised of huge number of WGs of small WIs,
+      * then get_wg_index_range() becomes a problem on manycore CPUs
+      * because lock contention on k->lock.
+      *
+      * If we have enough workgroups, scale up the requests linearly by
+      * num_threads, otherwise fallback to smaller workgroups.
+      */
+      unsigned limit;
+      if (k->remaining_wgs <= (scaled_max_wgs * num_threads))
+        limit = scaled_min_wgs;
+      else
+        limit = scaled_max_wgs;
+      
+      // divide two integers rounding up, i.e. ceil(k->remaining_wgs/num_threads)
+      const unsigned wgs_per_thread = (1 + (k->remaining_wgs - 1) / num_threads);
+      max_wgs = min (limit, wgs_per_thread);
+    }
 
-  // divide two integers rounding up, i.e. ceil(k->remaining_wgs/num_threads)
-  const unsigned wgs_per_thread = (1 + (k->remaining_wgs - 1) / num_threads);
-  max_wgs = min (limit, wgs_per_thread);
   max_wgs = min (max_wgs, k->remaining_wgs);
   assert (max_wgs > 0);
 
