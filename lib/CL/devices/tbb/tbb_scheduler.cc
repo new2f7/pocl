@@ -33,6 +33,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <tbb/task_group.h>
+
 #include "tbb_scheduler.h"
 #include "pocl_cl.h"
 #include "tbb.h"
@@ -70,8 +72,7 @@ typedef struct scheduler_data_
   struct pool_thread_data *thread_pool;
   size_t local_mem_size;
 
-  _cl_command_node *work_queue
-      __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
+  _cl_command_node *work_queue __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
   kernel_run_command *kernel_queue;
 
   pthread_cond_t wake_pool __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
@@ -85,20 +86,16 @@ static scheduler_data scheduler;
 void
 tbb_scheduler_init (cl_device_id device)
 {
-  unsigned i;
-  size_t num_worker_threads = device->max_compute_units;
   POCL_FAST_INIT (scheduler.wq_lock_fast);
 
   pthread_cond_init (&(scheduler.wake_pool), NULL);
 
-  scheduler.thread_pool = reinterpret_cast<pool_thread_data*> (pocl_aligned_malloc (
-      HOST_CPU_CACHELINE_SIZE,
-      num_worker_threads * sizeof (struct pool_thread_data)));
-  memset (scheduler.thread_pool, 0,
-          num_worker_threads * sizeof (struct pool_thread_data));
+  scheduler.thread_pool = reinterpret_cast<pool_thread_data*> (
+          pocl_aligned_malloc (HOST_CPU_CACHELINE_SIZE, sizeof (struct pool_thread_data))
+                  );
+  memset (scheduler.thread_pool, 0, sizeof (struct pool_thread_data));
 
-  scheduler.num_threads = num_worker_threads;
-  assert (num_worker_threads > 0);
+  scheduler.num_threads = 1;
   scheduler.printf_buf_size = device->printf_buffer_size;
   assert (device->printf_buffer_size > 0);
 
@@ -107,14 +104,10 @@ tbb_scheduler_init (cl_device_id device)
    * TODO fix this */
   scheduler.local_mem_size = device->local_mem_size << 4;
 
-  for (i = 0; i < num_worker_threads; ++i)
-    {
-      scheduler.thread_pool[i].index = i;
-      pthread_create (&scheduler.thread_pool[i].thread, NULL,
+  scheduler.thread_pool[0].index = 0;
+  pthread_create (&scheduler.thread_pool[0].thread, NULL,
                       pocl_tbb_driver_thread,
-                      (void*)&scheduler.thread_pool[i]);
-    }
-
+                      (void*)&scheduler.thread_pool[0]);
 }
 
 void
@@ -177,57 +170,6 @@ shall_we_run_this (thread_data *td, cl_device_id subd)
   return 1;
 }
 
-/* Maximum and minimum chunk sizes for get_wg_index_range().
- * Each tbb driver's thread fetches work from a kernel's WG pool in
- * chunks, this determines the limits (scaled up by # of threads). */
-#define POCL_TBB_MAX_WGS 256
-#define POCL_TBB_MIN_WGS 32
-
-static int
-get_wg_index_range (kernel_run_command *k, unsigned *start_index,
-                    unsigned *end_index, int *last_wgs, unsigned num_threads)
-{
-  const unsigned scaled_max_wgs = POCL_TBB_MAX_WGS * num_threads;
-  const unsigned scaled_min_wgs = POCL_TBB_MIN_WGS * num_threads;
-
-  unsigned limit;
-  unsigned max_wgs;
-  POCL_FAST_LOCK (k->lock);
-  if (k->remaining_wgs == 0)
-    {
-      POCL_FAST_UNLOCK (k->lock);
-      return 0;
-    }
-
-  /* If the work is comprised of huge number of WGs of small WIs,
-   * then get_wg_index_range() becomes a problem on manycore CPUs
-   * because lock contention on k->lock.
-   *
-   * If we have enough workgroups, scale up the requests linearly by
-   * num_threads, otherwise fallback to smaller workgroups.
-   */
-  if (k->remaining_wgs <= (scaled_max_wgs * num_threads))
-    limit = scaled_min_wgs;
-  else
-    limit = scaled_max_wgs;
-
-  // divide two integers rounding up, i.e. ceil(k->remaining_wgs/num_threads)
-  const unsigned wgs_per_thread = (1 + (k->remaining_wgs - 1) / num_threads);
-  max_wgs = std::min (limit, wgs_per_thread);
-  max_wgs = std::min (max_wgs, static_cast<unsigned> (k->remaining_wgs));
-  assert (max_wgs > 0);
-
-  *start_index = k->wgs_dealt;
-  *end_index = k->wgs_dealt + max_wgs-1;
-  k->remaining_wgs -= max_wgs;
-  k->wgs_dealt += max_wgs;
-  if (k->remaining_wgs == 0)
-    *last_wgs = 1;
-  POCL_FAST_UNLOCK (k->lock);
-
-  return 1;
-}
-
 inline static void translate_wg_index_to_3d_index (kernel_run_command *k,
                                                    unsigned index,
                                                    size_t *index_3d,
@@ -249,19 +191,11 @@ work_group_scheduler (kernel_run_command *k,
   void *arguments2[meta->num_args + meta->num_locals + 1];
   struct pocl_context pc;
   unsigned i;
-  unsigned start_index;
-  unsigned end_index;
-  int last_wgs = 0;
-
-  if (!get_wg_index_range (k, &start_index, &end_index, &last_wgs, thread_data->num_threads))
-    return 0;
-
-  assert (end_index >= start_index);
 
   setup_kernel_arg_array_with_locals (
       (void **)&arguments, (void **)&arguments2, k, reinterpret_cast<char*> (thread_data->local_mem),
       scheduler.local_mem_size);
-  memcpy (&pc, &k->pc, sizeof (struct pocl_context));
+  memcpy (&pc, &k->pc, sizeof(struct pocl_context));
 
   // capacity and position already set up
   pc.printf_buffer = reinterpret_cast<uchar*> (thread_data->printf_buffer);
@@ -284,36 +218,33 @@ work_group_scheduler (kernel_run_command *k,
   unsigned slice_size = k->pc.num_groups[0] * k->pc.num_groups[1];
   unsigned row_size = k->pc.num_groups[0];
 
-  do
-    {
-      if (last_wgs)
-        {
-          POCL_FAST_LOCK (scheduler.wq_lock_fast);
-          DL_DELETE (scheduler.kernel_queue, k);
-          POCL_FAST_UNLOCK (scheduler.wq_lock_fast);
-        }
+  POCL_FAST_LOCK(scheduler.wq_lock_fast);
+  DL_DELETE(scheduler.kernel_queue, k);
+  POCL_FAST_UNLOCK(scheduler.wq_lock_fast);
 
-      for (i = start_index; i <= end_index; ++i)
-        {
-          size_t gids[3];
-          translate_wg_index_to_3d_index (k, i, gids, slice_size, row_size);
+  {
+    tbb::task_group g;
 
-#ifdef DEBUG_MT
-          printf("### exec_wg: gid_x %zu, gid_y %zu, gid_z %zu\n", gids[0], gids[1], gids[2]);
-#endif
-          pocl_set_default_rm ();
-          k->workgroup ((uint8_t*)arguments, (uint8_t*)&pc, gids[0], gids[1], gids[2]);
-        }
-    }
-  while (get_wg_index_range (k, &start_index, &end_index, &last_wgs, thread_data->num_threads));
+    for (i = 0; i <= k->remaining_wgs; ++i)
+      {
+        size_t gids[3];
+        translate_wg_index_to_3d_index(k, i, gids, slice_size, row_size);
+
+        pocl_set_default_rm();
+        g.run([&] {
+            k->workgroup((uint8_t *) arguments, (uint8_t * ) & pc, gids[0], gids[1], gids[2]);
+        });
+      }
+
+    g.wait();
+  }
 
   if (position > 0)
     {
       write (STDOUT_FILENO, pc.printf_buffer, position);
     }
 
-  free_kernel_arg_array_with_locals ((void **)&arguments, (void **)&arguments2,
-                                     k);
+  free_kernel_arg_array_with_locals ((void **)&arguments, (void **)&arguments2, k);
 
   return 1;
 }
