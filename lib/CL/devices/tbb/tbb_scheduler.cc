@@ -45,6 +45,7 @@
 #include "pocl_mem_management.h"
 
 static void* pocl_tbb_driver_thread (void *p);
+static void task_thread (kernel_run_command *k, struct pool_thread_data *thread_data, int wg_index);
 
 struct pool_thread_data
 {
@@ -182,15 +183,32 @@ inline static void translate_wg_index_to_3d_index (kernel_run_command *k,
 }
 
 static int
-work_group_scheduler (kernel_run_command *k,
-                      struct pool_thread_data *thread_data)
+work_group_scheduler (kernel_run_command *k, struct pool_thread_data *thread_data)
+{
+  tbb::task_group g;
+
+  for (int i = 0; i <= k->remaining_wgs; ++i)
+    {
+      g.run([&] {
+          task_thread(k, thread_data, i);
+      });
+    }
+
+  g.wait();
+
+  POCL_FAST_LOCK(scheduler.wq_lock_fast);
+  DL_DELETE(scheduler.kernel_queue, k);
+  POCL_FAST_UNLOCK(scheduler.wq_lock_fast);
+}
+
+static void
+task_thread (kernel_run_command *k, struct pool_thread_data *thread_data, int wg_index)
 {
   pocl_kernel_metadata_t *meta = k->kernel->meta;
 
   void *arguments[meta->num_args + meta->num_locals + 1];
   void *arguments2[meta->num_args + meta->num_locals + 1];
   struct pocl_context pc;
-  unsigned i;
 
   setup_kernel_arg_array_with_locals (
       (void **)&arguments, (void **)&arguments2, k, reinterpret_cast<char*> (thread_data->local_mem),
@@ -215,29 +233,13 @@ work_group_scheduler (kernel_run_command *k,
       thread_data->current_ftz = flush;
     }
 
+  size_t gids[3];
   unsigned slice_size = k->pc.num_groups[0] * k->pc.num_groups[1];
   unsigned row_size = k->pc.num_groups[0];
+  translate_wg_index_to_3d_index(k, wg_index, gids, slice_size, row_size);
 
-  POCL_FAST_LOCK(scheduler.wq_lock_fast);
-  DL_DELETE(scheduler.kernel_queue, k);
-  POCL_FAST_UNLOCK(scheduler.wq_lock_fast);
-
-  {
-    tbb::task_group g;
-
-    for (i = 0; i <= k->remaining_wgs; ++i)
-      {
-        size_t gids[3];
-        translate_wg_index_to_3d_index(k, i, gids, slice_size, row_size);
-
-        pocl_set_default_rm();
-        g.run([&] {
-            k->workgroup((uint8_t *) arguments, (uint8_t * ) & pc, gids[0], gids[1], gids[2]);
-        });
-      }
-
-    g.wait();
-  }
+  pocl_set_default_rm();
+  k->workgroup((uint8_t *) arguments, (uint8_t * ) & pc, gids[0], gids[1], gids[2]);
 
   if (position > 0)
     {
@@ -245,8 +247,6 @@ work_group_scheduler (kernel_run_command *k,
     }
 
   free_kernel_arg_array_with_locals ((void **)&arguments, (void **)&arguments2, k);
-
-  return 1;
 }
 
 static void
@@ -423,8 +423,7 @@ RETRY:
 }
 
 
-static
-void*
+static void*
 pocl_tbb_driver_thread (void *p)
 {
   struct pool_thread_data *td = (struct pool_thread_data*)p;
