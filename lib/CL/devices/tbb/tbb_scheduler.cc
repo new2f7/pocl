@@ -45,41 +45,30 @@
 #include "pocl_mem_management.h"
 
 static void* pocl_tbb_driver_thread (void *p);
-static void task_thread (kernel_run_command *k, struct pool_thread_data *thread_data, int wg_index);
 
-struct pool_thread_data
+typedef struct task_data_
 {
-  pthread_t thread __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
-
-  unsigned long executed_commands;
-  /* per-CU (= per-thread) local memory */
+  /* per-CU (= per-thread) local memory EDIT: now per task/WG local memory, as we leave a lot of decisions to TBB */
   void *local_mem;
   unsigned current_ftz;
-  unsigned num_threads;
-  /* index of this particular thread
-   * [0, num_threads-1]
-   * used for deciding whether a particular thread should run
-   * commands scheduled on a subdevice. */
-  unsigned index;
-  /* printf buffer*/
   void *printf_buffer;
-} __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
+} task_data __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
 
 typedef struct scheduler_data_
 {
-  unsigned num_threads;
   unsigned printf_buf_size;
 
-  struct pool_thread_data *thread_pool;
   size_t local_mem_size;
 
   _cl_command_node *work_queue __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
   kernel_run_command *kernel_queue;
 
-  pthread_cond_t wake_pool __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
   POCL_FAST_LOCK_T wq_lock_fast __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
 
-  int thread_pool_shutdown_requested;
+  pthread_t meta_thread __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
+  pthread_cond_t wake_meta_thread __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
+  
+  int meta_thread_shutdown_requested;
 } scheduler_data __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
 
 static scheduler_data scheduler;
@@ -89,14 +78,8 @@ tbb_scheduler_init (cl_device_id device)
 {
   POCL_FAST_INIT (scheduler.wq_lock_fast);
 
-  pthread_cond_init (&(scheduler.wake_pool), NULL);
+  pthread_cond_init (&(scheduler.wake_meta_thread), NULL);
 
-  scheduler.thread_pool = reinterpret_cast<pool_thread_data*> (
-          pocl_aligned_malloc (HOST_CPU_CACHELINE_SIZE, sizeof (struct pool_thread_data))
-                  );
-  memset (scheduler.thread_pool, 0, sizeof (struct pool_thread_data));
-
-  scheduler.num_threads = 1;
   scheduler.printf_buf_size = device->printf_buffer_size;
   assert (device->printf_buffer_size > 0);
 
@@ -105,11 +88,11 @@ tbb_scheduler_init (cl_device_id device)
    * TODO fix this */
   scheduler.local_mem_size = device->local_mem_size << 4;
 
-  scheduler.thread_pool[0].index = 0;
-  pthread_create (&scheduler.thread_pool[0].thread, NULL,
-                      pocl_tbb_driver_thread,
-                      (void*)&scheduler.thread_pool[0]);
+  /* create one meta thread to serve as an async interface thread */
+  pthread_create (&scheduler.meta_thread, NULL, pocl_tbb_driver_thread, NULL);
 }
+
+/* External functions declared in tbb_scheduler.h */
 
 void
 tbb_scheduler_uninit ()
@@ -117,20 +100,16 @@ tbb_scheduler_uninit ()
   unsigned i;
 
   POCL_FAST_LOCK (scheduler.wq_lock_fast);
-  scheduler.thread_pool_shutdown_requested = 1;
-  pthread_cond_broadcast (&scheduler.wake_pool);
+  scheduler.meta_thread_shutdown_requested = 1;
+  pthread_cond_broadcast (&scheduler.wake_meta_thread);
   POCL_FAST_UNLOCK (scheduler.wq_lock_fast);
 
-  for (i = 0; i < scheduler.num_threads; ++i)
-    {
-      pthread_join (scheduler.thread_pool[i].thread, NULL);
-    }
+  pthread_join (scheduler.meta_thread, NULL);
 
-  pocl_aligned_free (scheduler.thread_pool);
   POCL_FAST_DESTROY (scheduler.wq_lock_fast);
-  pthread_cond_destroy (&scheduler.wake_pool);
+  pthread_cond_destroy (&scheduler.wake_meta_thread);
 
-  scheduler.thread_pool_shutdown_requested = 0;
+  scheduler.meta_thread_shutdown_requested = 0;
 }
 
 /* push_command and push_kernel MUST use broadcast and wake up all threads,
@@ -139,7 +118,7 @@ void tbb_scheduler_push_command (_cl_command_node *cmd)
 {
   POCL_FAST_LOCK (scheduler.wq_lock_fast);
   DL_APPEND (scheduler.work_queue, cmd);
-  pthread_cond_broadcast (&scheduler.wake_pool);
+  pthread_cond_broadcast (&scheduler.wake_meta_thread);
   POCL_FAST_UNLOCK (scheduler.wq_lock_fast);
 }
 
@@ -148,28 +127,11 @@ tbb_scheduler_push_kernel (kernel_run_command *run_cmd)
 {
   POCL_FAST_LOCK (scheduler.wq_lock_fast);
   DL_APPEND (scheduler.kernel_queue, run_cmd);
-  pthread_cond_broadcast (&scheduler.wake_pool);
+  pthread_cond_broadcast (&scheduler.wake_meta_thread);
   POCL_FAST_UNLOCK (scheduler.wq_lock_fast);
 }
 
-/* if subd is not a subdevice, returns 1
- * if subd is subdevice, takes a look at the subdevice CUs
- * and if they match the current driver thread, returns 1
- * otherwise returns 0 */
-static int
-shall_we_run_this (thread_data *td, cl_device_id subd)
-{
-
-  if (subd && subd->parent_device)
-    {
-      if (!((td->index >= subd->core_start)
-            && (td->index < (subd->core_start + subd->core_count))))
-        {
-          return 0;
-        }
-    }
-  return 1;
-}
+/* HINT: continue reading from the bottom of this file up to this point */
 
 inline static void translate_wg_index_to_3d_index (kernel_run_command *k,
                                                    unsigned index,
@@ -182,27 +144,8 @@ inline static void translate_wg_index_to_3d_index (kernel_run_command *k,
   index_3d[0] = (index % xy_slice) % row_size;
 }
 
-static int
-work_group_scheduler (kernel_run_command *k, struct pool_thread_data *thread_data)
-{
-  tbb::task_group g;
-
-  for (int i = 0; i <= k->remaining_wgs; ++i)
-    {
-      g.run([&] {
-          task_thread(k, thread_data, i);
-      });
-    }
-
-  g.wait();
-
-  POCL_FAST_LOCK(scheduler.wq_lock_fast);
-  DL_DELETE(scheduler.kernel_queue, k);
-  POCL_FAST_UNLOCK(scheduler.wq_lock_fast);
-}
-
 static void
-task_thread (kernel_run_command *k, struct pool_thread_data *thread_data, int wg_index)
+task_thread (kernel_run_command *k, task_data *td, int wg_index)
 {
   pocl_kernel_metadata_t *meta = k->kernel->meta;
 
@@ -211,12 +154,12 @@ task_thread (kernel_run_command *k, struct pool_thread_data *thread_data, int wg
   struct pocl_context pc;
 
   setup_kernel_arg_array_with_locals (
-      (void **)&arguments, (void **)&arguments2, k, reinterpret_cast<char*> (thread_data->local_mem),
+      (void **)&arguments, (void **)&arguments2, k, reinterpret_cast<char*> (td->local_mem),
       scheduler.local_mem_size);
   memcpy (&pc, &k->pc, sizeof(struct pocl_context));
 
   // capacity and position already set up
-  pc.printf_buffer = reinterpret_cast<uchar*> (thread_data->printf_buffer);
+  pc.printf_buffer = reinterpret_cast<uchar*> (td->printf_buffer);
   uint32_t position = 0;
   pc.printf_buffer_position = &position;
   assert (pc.printf_buffer != NULL);
@@ -227,10 +170,10 @@ task_thread (kernel_run_command *k, struct pool_thread_data *thread_data, int wg
    * a compilation option), but we need to reset rounding mode after every
    * iteration (since it can be changed during kernel execution). */
   unsigned flush = k->kernel->program->flush_denorms;
-  if (thread_data->current_ftz != flush)
+  if (td->current_ftz != flush)
     {
       pocl_set_ftz (flush);
-      thread_data->current_ftz = flush;
+      td->current_ftz = flush;
     }
 
   size_t gids[3];
@@ -249,9 +192,50 @@ task_thread (kernel_run_command *k, struct pool_thread_data *thread_data, int wg
   free_kernel_arg_array_with_locals ((void **)&arguments, (void **)&arguments2, k);
 }
 
+static int
+work_group_scheduler (kernel_run_command *k)
+{
+  size_t pool_size = sizeof (task_data) * k->remaining_wgs;
+  task_data *task_pool = reinterpret_cast<task_data*> (
+        pocl_aligned_malloc (HOST_CPU_CACHELINE_SIZE, pool_size)
+                );
+  memset (task_pool, 0, pool_size);
+
+  for (int i = 0; i < k->remaining_wgs; ++i) {
+    /* some random value, doesn't matter as long as it's not a valid bool - to force a first FTZ setup */
+    task_pool[i].current_ftz = 213;
+    task_pool[i].printf_buffer = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT, scheduler.printf_buf_size);
+    assert (task_pool[i].printf_buffer != NULL);
+    assert (scheduler.local_mem_size > 0);
+    task_pool[i].local_mem = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT, scheduler.local_mem_size);
+    assert (task_pool[i].local_mem);
+  }
+
+  { // begin parallel region
+    tbb::task_group g;
+
+    for (int i = 0; i < k->remaining_wgs; ++i)
+      {
+        g.run([&] {
+            task_thread(k, &task_pool[i], i);
+        });
+      }
+
+    g.wait();
+  } // end parallel region
+
+  for (int i = 0; i < k->remaining_wgs; ++i) {
+    pocl_aligned_free (task_pool[i].printf_buffer);
+    pocl_aligned_free (task_pool[i].local_mem);
+  }
+
+  k->wgs_dealt = k->remaining_wgs;
+  k->remaining_wgs = 0;
+  pocl_aligned_free (task_pool);
+}
+
 static void
-finalize_kernel_command (struct pool_thread_data *thread_data,
-                         kernel_run_command *k)
+finalize_kernel_command (kernel_run_command *k)
 {
 #ifdef DEBUG_MT
   printf("### kernel %s finished\n", k->cmd->command.run.kernel->name);
@@ -305,61 +289,34 @@ pocl_tbb_prepare_kernel (void *data, _cl_command_node *cmd)
   tbb_scheduler_push_kernel (run_cmd);
 }
 
-/*
-  These two check the entire kernel/cmd queue. This is necessary
-  because of commands for subdevices. The old code only checked
-  the head of each queue; this can lead to a deadlock:
-
-  two driver threads, each assigned two subdevices A, B, one
-  driver queue C
-
-  cmd A1 for A arrives in C, A starts processing
-  cmd B1 for B arrives in C, B starts processing
-  cmds A2, A3, B2 are pushed to C
-  B finishes processing B1, checks queue head, A2 isn't for it, goes to sleep
-  A finishes processing A1, processes A2 + A3 but ignores B2, it's not for it
-  application calls clFinish to wait for queue
-
-  ...now B is sleeping and not possible to wake up
-  (since no new commands can arrive) and there's a B2 command
-  which will never be processed.
-
-  it's possible to workaround but it's cleaner to just check the whole queue.
- */
-
 static _cl_command_node *
-check_cmd_queue_for_device (thread_data *td)
+check_cmd_queue_for_device ()
 {
   _cl_command_node *cmd;
   DL_FOREACH (scheduler.work_queue, cmd)
   {
-    cl_device_id subd = cmd->device;
-    if (shall_we_run_this (td, subd))
-      {
-        DL_DELETE (scheduler.work_queue, cmd)
-        return cmd;
-      }
+    DL_DELETE (scheduler.work_queue, cmd)
+    return cmd; // return first cmd, ToDo: make pretty
   }
 
   return NULL;
 }
 
 static kernel_run_command *
-check_kernel_queue_for_device (thread_data *td)
+check_kernel_queue_for_device ()
 {
   kernel_run_command *cmd;
   DL_FOREACH (scheduler.kernel_queue, cmd)
   {
-    cl_device_id subd = cmd->device;
-    if (shall_we_run_this (td, subd))
-      return cmd;
+    DL_DELETE (scheduler.kernel_queue, cmd)
+    return cmd; // return first cmd, ToDo: make pretty
   }
 
   return NULL;
 }
 
 static int
-tbb_scheduler_get_work (thread_data *td)
+tbb_scheduler_get_work ()
 {
   _cl_command_node *cmd;
   kernel_run_command *run_cmd;
@@ -369,28 +326,28 @@ tbb_scheduler_get_work (thread_data *td)
   int do_exit = 0;
 
 RETRY:
-  do_exit = scheduler.thread_pool_shutdown_requested;
+  do_exit = scheduler.meta_thread_shutdown_requested;
 
-  run_cmd = check_kernel_queue_for_device (td);
+  run_cmd = check_kernel_queue_for_device ();
   /* execute kernel if available */
   if (run_cmd)
     {
       ++run_cmd->ref_count;
       POCL_FAST_UNLOCK (scheduler.wq_lock_fast);
 
-      work_group_scheduler (run_cmd, td);
+      work_group_scheduler (run_cmd);
 
       POCL_FAST_LOCK (scheduler.wq_lock_fast);
       if ((--run_cmd->ref_count) == 0)
         {
           POCL_FAST_UNLOCK (scheduler.wq_lock_fast);
-          finalize_kernel_command (td, run_cmd);
+          finalize_kernel_command (run_cmd);
           POCL_FAST_LOCK (scheduler.wq_lock_fast);
         }
     }
 
   /* execute a command if available */
-  cmd = check_cmd_queue_for_device (td);
+  cmd = check_cmd_queue_for_device ();
   if (cmd)
     {
       POCL_FAST_UNLOCK (scheduler.wq_lock_fast);
@@ -407,13 +364,12 @@ RETRY:
         }
 
       POCL_FAST_LOCK (scheduler.wq_lock_fast);
-      ++td->executed_commands;
     }
 
   /* if neither a command nor a kernel was available, sleep */
   if ((cmd == NULL) && (run_cmd == NULL) && (do_exit == 0))
     {
-      pthread_cond_wait (&scheduler.wake_pool, &scheduler.wq_lock_fast);
+      pthread_cond_wait (&scheduler.wake_meta_thread, &scheduler.wq_lock_fast);
       goto RETRY;
     }
 
@@ -422,42 +378,16 @@ RETRY:
   return do_exit;
 }
 
-
 static void*
 pocl_tbb_driver_thread (void *p)
 {
-  struct pool_thread_data *td = (struct pool_thread_data*)p;
   int do_exit = 0;
-  assert (td);
-  /* some random value, doesn't matter as long as it's not a valid bool - to
-   * force a first FTZ setup */
-  td->current_ftz = 213;
-  td->num_threads = scheduler.num_threads;
-  td->printf_buffer = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT,
-                                           scheduler.printf_buf_size);
-  assert (td->printf_buffer != NULL);
-
-  assert (scheduler.local_mem_size > 0);
-  td->local_mem = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT,
-                                       scheduler.local_mem_size);
-  assert (td->local_mem);
-#ifdef __linux__
-  if (pocl_get_bool_option ("POCL_AFFINITY", 0))
-    {
-      cpu_set_t set;
-      CPU_ZERO (&set);
-      CPU_SET (td->index, &set);
-      pthread_setaffinity_np (td->thread, sizeof (cpu_set_t), &set);
-    }
-#endif
 
   while (1)
     {
-      do_exit = tbb_scheduler_get_work (td);
+      do_exit = tbb_scheduler_get_work ();
       if (do_exit)
         {
-          pocl_aligned_free (td->printf_buffer);
-          pocl_aligned_free (td->local_mem);
           pthread_exit (NULL);
         }
     }
