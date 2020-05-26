@@ -46,14 +46,6 @@
 
 static void* pocl_tbb_driver_thread (void *p);
 
-typedef struct task_data_
-{
-  /* per-CU (= per-thread) local memory EDIT: now per task/WG local memory, as we leave a lot of decisions to TBB */
-  void *local_mem;
-  unsigned current_ftz;
-  void *printf_buffer;
-} task_data __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
-
 typedef struct scheduler_data_
 {
   unsigned printf_buf_size;
@@ -145,21 +137,25 @@ inline static void translate_wg_index_to_3d_index (kernel_run_command *k,
 }
 
 static void
-task_thread (kernel_run_command *k, task_data *td, int wg_index)
+task_thread (kernel_run_command *k, int wg_index)
 {
   pocl_kernel_metadata_t *meta = k->kernel->meta;
 
   void *arguments[meta->num_args + meta->num_locals + 1];
   void *arguments2[meta->num_args + meta->num_locals + 1];
+  void *local_mem = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT, scheduler.local_mem_size);
+  void *printf_buffer = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT, scheduler.printf_buf_size);
   struct pocl_context pc;
+  /* some random value, doesn't matter as long as it's not a valid bool - to force a first FTZ setup */
+  unsigned current_ftz = 213;
 
   setup_kernel_arg_array_with_locals (
-      (void **)&arguments, (void **)&arguments2, k, reinterpret_cast<char*> (td->local_mem),
+      (void **)&arguments, (void **)&arguments2, k, reinterpret_cast<char*> (local_mem),
       scheduler.local_mem_size);
   memcpy (&pc, &k->pc, sizeof(struct pocl_context));
 
   // capacity and position already set up
-  pc.printf_buffer = reinterpret_cast<uchar*> (td->printf_buffer);
+  pc.printf_buffer = reinterpret_cast<uchar*> (printf_buffer);
   uint32_t position = 0;
   pc.printf_buffer_position = &position;
   assert (pc.printf_buffer != NULL);
@@ -170,10 +166,10 @@ task_thread (kernel_run_command *k, task_data *td, int wg_index)
    * a compilation option), but we need to reset rounding mode after every
    * iteration (since it can be changed during kernel execution). */
   unsigned flush = k->kernel->program->flush_denorms;
-  if (td->current_ftz != flush)
+  if (current_ftz != flush)
     {
       pocl_set_ftz (flush);
-      td->current_ftz = flush;
+      current_ftz = flush;
     }
 
   size_t gids[3];
@@ -190,48 +186,23 @@ task_thread (kernel_run_command *k, task_data *td, int wg_index)
     }
 
   free_kernel_arg_array_with_locals ((void **)&arguments, (void **)&arguments2, k);
+  pocl_aligned_free (local_mem);
+  pocl_aligned_free (printf_buffer);
 }
 
 static int
 work_group_scheduler (kernel_run_command *k)
 {
-  size_t pool_size = sizeof (task_data) * k->remaining_wgs;
-  task_data *task_pool = reinterpret_cast<task_data*> (
-        pocl_aligned_malloc (HOST_CPU_CACHELINE_SIZE, pool_size)
-                );
-  memset (task_pool, 0, pool_size);
-
-  for (int i = 0; i < k->remaining_wgs; ++i) {
-    /* some random value, doesn't matter as long as it's not a valid bool - to force a first FTZ setup */
-    task_pool[i].current_ftz = 213;
-    task_pool[i].printf_buffer = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT, scheduler.printf_buf_size);
-    assert (task_pool[i].printf_buffer != NULL);
-    assert (scheduler.local_mem_size > 0);
-    task_pool[i].local_mem = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT, scheduler.local_mem_size);
-    assert (task_pool[i].local_mem);
-  }
-
-  { // begin parallel region
     tbb::task_group g;
 
     for (int i = 0; i < k->remaining_wgs; ++i)
       {
         g.run([&] {
-            task_thread(k, &task_pool[i], i);
+            task_thread(k, i);
         });
       }
 
     g.wait();
-  } // end parallel region
-
-  for (int i = 0; i < k->remaining_wgs; ++i) {
-    pocl_aligned_free (task_pool[i].printf_buffer);
-    pocl_aligned_free (task_pool[i].local_mem);
-  }
-
-  k->wgs_dealt = k->remaining_wgs;
-  k->remaining_wgs = 0;
-  pocl_aligned_free (task_pool);
 }
 
 static void
