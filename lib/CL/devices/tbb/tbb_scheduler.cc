@@ -53,17 +53,16 @@ typedef struct scheduler_data_
   size_t local_mem_size;
 
   _cl_command_node *work_queue __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
-  kernel_run_command *kernel_queue;
-
   POCL_FAST_LOCK_T wq_lock_fast __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
 
   pthread_t meta_thread __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
   pthread_cond_t wake_meta_thread __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
-  
   int meta_thread_shutdown_requested;
 } scheduler_data __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
 
 static scheduler_data scheduler;
+
+/* External functions declared in tbb_scheduler.h */
 
 void
 tbb_scheduler_init (cl_device_id device)
@@ -83,8 +82,6 @@ tbb_scheduler_init (cl_device_id device)
   /* create one meta thread to serve as an async interface thread */
   pthread_create (&scheduler.meta_thread, NULL, pocl_tbb_driver_thread, NULL);
 }
-
-/* External functions declared in tbb_scheduler.h */
 
 void
 tbb_scheduler_uninit ()
@@ -110,15 +107,6 @@ void tbb_scheduler_push_command (_cl_command_node *cmd)
 {
   POCL_FAST_LOCK (scheduler.wq_lock_fast);
   DL_APPEND (scheduler.work_queue, cmd);
-  pthread_cond_broadcast (&scheduler.wake_meta_thread);
-  POCL_FAST_UNLOCK (scheduler.wq_lock_fast);
-}
-
-static void
-tbb_scheduler_push_kernel (kernel_run_command *run_cmd)
-{
-  POCL_FAST_LOCK (scheduler.wq_lock_fast);
-  DL_APPEND (scheduler.kernel_queue, run_cmd);
   pthread_cond_broadcast (&scheduler.wake_meta_thread);
   POCL_FAST_UNLOCK (scheduler.wq_lock_fast);
 }
@@ -195,9 +183,9 @@ work_group_scheduler (kernel_run_command *k)
 {
     tbb::task_group g;
 
-    for (int i = 0; i < k->remaining_wgs; ++i)
+    for (int i = 0; i < k->num_groups; ++i)
       {
-        g.run([&] {
+        g.run([=] {
             task_thread(k, i);
         });
       }
@@ -221,11 +209,10 @@ finalize_kernel_command (kernel_run_command *k)
   POCL_UPDATE_EVENT_COMPLETE_MSG (k->cmd->event, "NDRange Kernel        ");
 
   pocl_mem_manager_free_command (k->cmd);
-  POCL_FAST_DESTROY (k->lock);
   free_kernel_run_command (k);
 }
 
-static void
+static kernel_run_command *
 pocl_tbb_prepare_kernel (void *data, _cl_command_node *cmd)
 {
   kernel_run_command *run_cmd;
@@ -245,19 +232,16 @@ pocl_tbb_prepare_kernel (void *data, _cl_command_node *cmd)
   run_cmd->pc.printf_buffer = NULL;
   run_cmd->pc.printf_buffer_capacity = scheduler.printf_buf_size;
   run_cmd->pc.printf_buffer_position = NULL;
-  run_cmd->remaining_wgs = num_groups;
-  run_cmd->wgs_dealt = 0;
+  run_cmd->num_groups = num_groups;
   run_cmd->workgroup = reinterpret_cast<pocl_workgroup_func> (cmd->command.run.wg);
   run_cmd->kernel_args = cmd->command.run.arguments;
   run_cmd->next = NULL;
-  run_cmd->ref_count = 0;
-  POCL_FAST_INIT (run_cmd->lock);
 
   setup_kernel_arg_array (run_cmd);
 
   pocl_update_event_running (cmd->event);
 
-  tbb_scheduler_push_kernel (run_cmd);
+  return (run_cmd);
 }
 
 static _cl_command_node *
@@ -273,49 +257,17 @@ check_cmd_queue_for_device ()
   return NULL;
 }
 
-static kernel_run_command *
-check_kernel_queue_for_device ()
-{
-  kernel_run_command *cmd;
-  DL_FOREACH (scheduler.kernel_queue, cmd)
-  {
-    DL_DELETE (scheduler.kernel_queue, cmd)
-    return cmd; // return first cmd, ToDo: make pretty
-  }
-
-  return NULL;
-}
-
 static int
 tbb_scheduler_get_work ()
 {
   _cl_command_node *cmd;
   kernel_run_command *run_cmd;
 
-  /* execute kernel if available */
   POCL_FAST_LOCK (scheduler.wq_lock_fast);
   int do_exit = 0;
 
 RETRY:
   do_exit = scheduler.meta_thread_shutdown_requested;
-
-  run_cmd = check_kernel_queue_for_device ();
-  /* execute kernel if available */
-  if (run_cmd)
-    {
-      ++run_cmd->ref_count;
-      POCL_FAST_UNLOCK (scheduler.wq_lock_fast);
-
-      work_group_scheduler (run_cmd);
-
-      POCL_FAST_LOCK (scheduler.wq_lock_fast);
-      if ((--run_cmd->ref_count) == 0)
-        {
-          POCL_FAST_UNLOCK (scheduler.wq_lock_fast);
-          finalize_kernel_command (run_cmd);
-          POCL_FAST_LOCK (scheduler.wq_lock_fast);
-        }
-    }
 
   /* execute a command if available */
   cmd = check_cmd_queue_for_device ();
@@ -327,7 +279,9 @@ RETRY:
 
       if (cmd->type == CL_COMMAND_NDRANGE_KERNEL)
         {
-          pocl_tbb_prepare_kernel (cmd->device->data, cmd);
+          run_cmd = pocl_tbb_prepare_kernel (cmd->device->data, cmd);
+          work_group_scheduler (run_cmd);
+          finalize_kernel_command (run_cmd);
         }
       else
         {
@@ -337,8 +291,8 @@ RETRY:
       POCL_FAST_LOCK (scheduler.wq_lock_fast);
     }
 
-  /* if neither a command nor a kernel was available, sleep */
-  if ((cmd == NULL) && (run_cmd == NULL) && (do_exit == 0))
+  /* if no command was available, sleep */
+  if ((cmd == NULL) && (do_exit == 0))
     {
       pthread_cond_wait (&scheduler.wake_meta_thread, &scheduler.wq_lock_fast);
       goto RETRY;

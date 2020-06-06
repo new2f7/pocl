@@ -45,7 +45,6 @@ struct kernel_run_command
   struct pocl_argument *kernel_args;
   kernel_run_command *prev;
   kernel_run_command *next;
-  unsigned long ref_count;
 
   /* actual kernel arguments. these are setup once at the kernel setup
    * phase, then each thread sets up the local arguments for itself. */
@@ -53,10 +52,7 @@ struct kernel_run_command
   /* this is required b/c there's an additional level of indirection */
   void **arguments2;
 
-  POCL_FAST_LOCK_T lock __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
-
-  size_t remaining_wgs __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
-  size_t wgs_dealt;
+  size_t num_groups __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
 
   struct pocl_context pc __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
 
