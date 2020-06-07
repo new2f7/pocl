@@ -33,7 +33,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include <tbb/task_group.h>
+#include <tbb/parallel_for.h>
 
 #include "tbb_scheduler.h"
 #include "pocl_cl.h"
@@ -178,28 +178,22 @@ task_thread (kernel_run_command *k, int wg_index)
   pocl_aligned_free (printf_buffer);
 }
 
-static int
-work_group_scheduler (kernel_run_command *k)
-{
-    tbb::task_group g;
-
-    for (int i = 0; i < k->num_groups; ++i)
-      {
-        g.run([=] {
-            task_thread(k, i);
-        });
-      }
-
-    g.wait();
-}
+class WorkGroupScheduler {
+  kernel_run_command *my_k;
+public:
+  void operator()( const tbb::blocked_range<size_t>& r ) const {
+    kernel_run_command *k = my_k;
+    for( size_t i=r.begin(); i!=r.end(); ++i )
+      task_thread(k, i);
+  }
+  WorkGroupScheduler( kernel_run_command *k ) :
+      my_k(k)
+  {}
+};
 
 static void
 finalize_kernel_command (kernel_run_command *k)
 {
-#ifdef DEBUG_MT
-  printf("### kernel %s finished\n", k->cmd->command.run.kernel->name);
-#endif
-
   free_kernel_arg_array (k);
 
   pocl_release_dlhandle_cache (k->cmd);
@@ -280,7 +274,7 @@ RETRY:
       if (cmd->type == CL_COMMAND_NDRANGE_KERNEL)
         {
           run_cmd = pocl_tbb_prepare_kernel (cmd->device->data, cmd);
-          work_group_scheduler (run_cmd);
+          tbb::parallel_for (tbb::blocked_range<size_t>(0, run_cmd->num_groups), WorkGroupScheduler(run_cmd));
           finalize_kernel_command (run_cmd);
         }
       else
