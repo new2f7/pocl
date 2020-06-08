@@ -44,7 +44,7 @@ extern "C" {
 #include <unistd.h>
 #include <utlist.h>
 
-#include <tbb/task_group.h>
+#include <tbb/parallel_for.h>
 
 #include "pocl_cache.h"
 #include "pocl_timing.h"
@@ -565,6 +565,39 @@ pocl_tbb_write (void *data,
   memcpy ((char *)device_ptr + offset, host_ptr, size);
 }
 
+inline static void translate_wg_index_to_3d_index (unsigned index,
+                                                   size_t *index_3d,
+                                                   unsigned xy_slice,
+                                                   unsigned row_size)
+{
+  index_3d[2] = index / xy_slice;
+  index_3d[1] = (index % xy_slice) / row_size;
+  index_3d[0] = (index % xy_slice) % row_size;
+}
+
+class WorkGroupScheduler {
+  _cl_command_node *my_k;
+  void **my_arguments;
+public:
+  void operator()( const tbb::blocked_range<size_t>& r ) const {
+    _cl_command_node *k = my_k;
+    uint8_t *arguments = reinterpret_cast<uint8_t*>(my_arguments);
+    
+    size_t gids[3];
+    unsigned slice_size = k->command.run.pc.num_groups[0] * k->command.run.pc.num_groups[1];
+    unsigned row_size = k->command.run.pc.num_groups[0];
+    
+    for( size_t i=r.begin(); i!=r.end(); ++i ) {
+      translate_wg_index_to_3d_index(i, gids, slice_size, row_size);
+      
+      ((pocl_workgroup_func) k->command.run.wg) (arguments, (uint8_t *)&k->command.run.pc, gids[0], gids[1], gids[2]);
+    }
+  }
+  WorkGroupScheduler( _cl_command_node *k, void **arguments ) :
+      my_k(k), my_arguments(arguments)
+  {}
+};
+
 void
 pocl_tbb_run (void *data, _cl_command_node *cmd)
 {
@@ -671,15 +704,8 @@ pocl_tbb_run (void *data, _cl_command_node *cmd)
   unsigned ftz = pocl_save_ftz ();
   pocl_set_ftz (kernel->program->flush_denorms);
 
-  tbb::task_group g;
-
-  for (z = 0; z < pc->num_groups[2]; ++z)
-    for (y = 0; y < pc->num_groups[1]; ++y)
-      for (x = 0; x < pc->num_groups[0]; ++x)
-        g.run( [&]{((pocl_workgroup_func) cmd->command.run.wg)
-         ((uint8_t *)arguments, (uint8_t *)pc, x, y, z);} );
-
-  g.wait();
+  size_t n = pc->num_groups[0] * pc->num_groups[1] * pc->num_groups[2];
+  tbb::parallel_for (tbb::blocked_range<size_t>(0, n), WorkGroupScheduler(cmd, arguments));
 
   pocl_restore_rm (rm);
   pocl_restore_ftz (ftz);
