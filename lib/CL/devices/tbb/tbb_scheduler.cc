@@ -131,7 +131,7 @@ tbb_scheduler_push_command (_cl_command_node *cmd)
 /* HINT: continue reading from the bottom of this file up to this point */
 
 inline static void
-translate_wg_index_to_3d_index (kernel_run_command *k, unsigned index, size_t *index_3d, unsigned xy_slice, unsigned row_size)
+translate_wg_index_to_3d_index (unsigned index, size_t *index_3d, unsigned xy_slice, unsigned row_size)
 {
   index_3d[2] = index / xy_slice;
   index_3d[1] = (index % xy_slice) / row_size;
@@ -139,106 +139,192 @@ translate_wg_index_to_3d_index (kernel_run_command *k, unsigned index, size_t *i
 }
 
 class WorkGroupScheduler {
-  kernel_run_command *my_k;
+  _cl_command_node *my_k;
+  void **my_arguments;
+  
 public:
   void operator()( const tbb::blocked_range<size_t>& r ) const {
-    kernel_run_command *k = my_k;
-    pocl_kernel_metadata_t *meta = k->kernel->meta;
-    const size_t my_thread_id = tbb::this_task_arena::current_thread_index();
-    void *arguments[meta->num_args + meta->num_locals + 1];
-    void *arguments2[meta->num_args + meta->num_locals + 1];
-    void *local_mem = scheduler.local_mem_global_ptr + (scheduler.local_mem_size * my_thread_id);
-    void *printf_buffer = scheduler.printf_buf_global_ptr + (scheduler.printf_buf_size * my_thread_id);
-    struct pocl_context pc;
-    /* some random value, doesn't matter as long as it's not a valid bool - to force a first FTZ setup */
-    unsigned current_ftz = 213;
-
-    setup_kernel_arg_array_with_locals ((void **)&arguments, (void **)&arguments2, k, reinterpret_cast<char*> (local_mem), scheduler.local_mem_size);
-    memcpy (&pc, &k->pc, sizeof(struct pocl_context));
-
-    // capacity and position already set up
-    pc.printf_buffer = reinterpret_cast<uchar*> (printf_buffer);
-    uint32_t position = 0;
-    pc.printf_buffer_position = &position;
-    assert (pc.printf_buffer != NULL);
-    assert (pc.printf_buffer_capacity > 0);
-    assert (pc.printf_buffer_position != NULL);
-
-    /* Flush to zero is only set once at start of kernel (because FTZ is
-     * a compilation option), but we need to reset rounding mode after every
-     * iteration (since it can be changed during kernel execution). */
-    unsigned flush = k->kernel->program->flush_denorms;
-    if (current_ftz != flush) {
-      pocl_set_ftz (flush);
-      current_ftz = flush;
-    }
-
+    _cl_command_node *k = my_k;
+    uint8_t *arguments = reinterpret_cast<uint8_t*>(my_arguments);
+    
     size_t gids[3];
-    unsigned slice_size = k->pc.num_groups[0] * k->pc.num_groups[1];
-    unsigned row_size = k->pc.num_groups[0];
-
-    for (size_t i=r.begin(); i!=r.end(); ++i) {
-      translate_wg_index_to_3d_index(k, i, gids, slice_size, row_size);
-      pocl_set_default_rm();
-      k->workgroup((uint8_t *) arguments, (uint8_t * ) & pc, gids[0], gids[1], gids[2]);
+    unsigned slice_size = k->command.run.pc.num_groups[0] * k->command.run.pc.num_groups[1];
+    unsigned row_size = k->command.run.pc.num_groups[0];
+    
+    for( size_t i=r.begin(); i!=r.end(); ++i ) {
+      translate_wg_index_to_3d_index(i, gids, slice_size, row_size);
+      ((pocl_workgroup_func) k->command.run.wg) (arguments, (uint8_t *)&k->command.run.pc, gids[0], gids[1], gids[2]);
     }
-
-    if (position > 0) {
-      write (STDOUT_FILENO, pc.printf_buffer, position);
-    }
-
-    free_kernel_arg_array_with_locals ((void **)&arguments, (void **)&arguments2, k);
   }
-  WorkGroupScheduler( kernel_run_command *k ) :
-      my_k(k)
+
+  WorkGroupScheduler( _cl_command_node *k, void **arguments ) :
+      my_k(k), my_arguments(arguments)
   {}
 };
 
-static void
-finalize_kernel_command (kernel_run_command *k)
+void
+pocl_tbb_run_basic (_cl_command_node *cmd)
 {
-  free_kernel_arg_array (k);
-
-  pocl_release_dlhandle_cache (k->cmd);
-
-  pocl_ndrange_node_cleanup (k->cmd);
-
-  POCL_UPDATE_EVENT_COMPLETE_MSG (k->cmd->event, "NDRange Kernel        ");
-
-  pocl_mem_manager_free_command (k->cmd);
-  free_kernel_run_command (k);
-}
-
-static kernel_run_command *
-pocl_tbb_prepare_kernel (void *data, _cl_command_node *cmd)
-{
-  kernel_run_command *run_cmd;
+  struct pocl_argument *al;
+  size_t x, y, z;
+  unsigned i;
   cl_kernel kernel = cmd->command.run.kernel;
+  pocl_kernel_metadata_t *meta = kernel->meta;
   struct pocl_context *pc = &cmd->command.run.pc;
 
-  pocl_check_kernel_dlhandle_cache (cmd, 1, 1);
+  void **arguments = (void **)malloc (sizeof (void *) * (meta->num_args + meta->num_locals));
 
-  size_t num_groups = pc->num_groups[0] * pc->num_groups[1] * pc->num_groups[2];
+  /* Process the kernel arguments. Convert the opaque buffer
+     pointers to real device pointers, allocate dynamic local
+     memory buffers, etc. */
+  for (i = 0; i < meta->num_args; ++i)
+    {
+      al = &(cmd->command.run.arguments[i]);
+      if (ARG_IS_LOCAL (meta->arg_info[i]))
+        {
+          if (cmd->device->device_alloca_locals)
+            {
+              /* Local buffers are allocated in the device side work-group
+                 launcher. Let's pass only the sizes of the local args in
+                 the arg buffer. */
+              assert (sizeof (size_t) == sizeof (void *));
+              arguments[i] = (void *)al->size;
+            }
+          else
+            {
+              arguments[i] = malloc (sizeof (void *));
+              *(void **)(arguments[i]) =
+                pocl_aligned_malloc(MAX_EXTENDED_ALIGNMENT, al->size);
+            }
+        }
+      else if (meta->arg_info[i].type == POCL_ARG_TYPE_POINTER)
+        {
+          /* It's legal to pass a NULL pointer to clSetKernelArguments. In
+             that case we must pass the same NULL forward to the kernel.
+             Otherwise, the user must have created a buffer with per device
+             pointers stored in the cl_mem. */
+          arguments[i] = malloc (sizeof (void *));
+          if (al->value == NULL)
+            {
+              *(void **)arguments[i] = NULL;
+            }
+          else
+            {
+              cl_mem m = (*(cl_mem *)(al->value));
+              void *ptr = m->device_ptrs[cmd->device->dev_id].mem_ptr;
+              *(void **)arguments[i] = (char *)ptr + al->offset;
+            }
+        }
+      else if (meta->arg_info[i].type == POCL_ARG_TYPE_IMAGE)
+        {
+          dev_image_t di;
+          fill_dev_image_t (&di, al, cmd->device);
 
-  run_cmd = new_kernel_run_command ();
-  run_cmd->data = data;
-  run_cmd->kernel = kernel;
-  run_cmd->device = cmd->device;
-  run_cmd->pc = *pc;
-  run_cmd->cmd = cmd;
-  run_cmd->pc.printf_buffer = NULL;
-  run_cmd->pc.printf_buffer_capacity = scheduler.printf_buf_size;
-  run_cmd->pc.printf_buffer_position = NULL;
-  run_cmd->num_groups = num_groups;
-  run_cmd->workgroup = reinterpret_cast<pocl_workgroup_func> (cmd->command.run.wg);
-  run_cmd->kernel_args = cmd->command.run.arguments;
-  run_cmd->next = NULL;
+          void *devptr = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT,
+                                              sizeof (dev_image_t));
+          arguments[i] = malloc (sizeof (void *));
+          *(void **)(arguments[i]) = devptr;
+          memcpy (devptr, &di, sizeof (dev_image_t));
+        }
+      else if (meta->arg_info[i].type == POCL_ARG_TYPE_SAMPLER)
+        {
+          dev_sampler_t ds;
+          fill_dev_sampler_t(&ds, al);
+          arguments[i] = malloc (sizeof (void *));
+          *(void **)(arguments[i]) = (void *)ds;
+        }
+      else
+        {
+          arguments[i] = al->value;
+        }
+    }
 
-  setup_kernel_arg_array (run_cmd);
+  if (!cmd->device->device_alloca_locals)
+    for (i = 0; i < meta->num_locals; ++i)
+      {
+        size_t s = meta->local_sizes[i];
+        size_t j = meta->num_args + i;
+        arguments[j] = malloc (sizeof (void *));
+        void *pp = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT, s);
+        *(void **)(arguments[j]) = pp;
+      }
 
-  pocl_update_event_running (cmd->event);
+  pc->printf_buffer = reinterpret_cast<uchar*> (pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT, cmd->device->printf_buffer_size));
+  assert (pc->printf_buffer != NULL);
+  pc->printf_buffer_capacity = cmd->device->printf_buffer_size;
+  assert (pc->printf_buffer_capacity > 0);
+  uint32_t position = 0;
+  pc->printf_buffer_position = &position;
 
-  return (run_cmd);
+  unsigned rm = pocl_save_rm ();
+  pocl_set_default_rm ();
+  unsigned ftz = pocl_save_ftz ();
+  pocl_set_ftz (kernel->program->flush_denorms);
+
+  size_t n = pc->num_groups[0] * pc->num_groups[1] * pc->num_groups[2];
+
+#if defined(POCL_TBB_PARTITIONER_AFFINITY)
+  tbb::affinity_partitioner ap;
+#endif
+  tbb::parallel_for (tbb::blocked_range<size_t>(0, n)
+                    , WorkGroupScheduler(cmd, arguments)
+#if defined(POCL_TBB_PARTITIONER_AFFINITY)
+                    , ap
+#elif defined(POCL_TBB_PARTITIONER_SIMPLE)
+                    , tbb::simple_partitioner()
+#elif defined(POCL_TBB_PARTITIONER_STATIC)
+                    , tbb::static_partitioner()
+#endif
+                    );
+
+  pocl_restore_rm (rm);
+  pocl_restore_ftz (ftz);
+
+  if (position > 0)
+    {
+      write (STDOUT_FILENO, pc->printf_buffer, position);
+      position = 0;
+    }
+
+  pocl_aligned_free (pc->printf_buffer);
+
+  for (i = 0; i < meta->num_args; ++i)
+    {
+      if (ARG_IS_LOCAL (meta->arg_info[i]))
+        {
+          if (!cmd->device->device_alloca_locals)
+            {
+              POCL_MEM_FREE(*(void **)(arguments[i]));
+              POCL_MEM_FREE(arguments[i]);
+            }
+          else
+            {
+              /* Device side local space allocation has deallocation via stack
+                 unwind. */
+            }
+        }
+      else if (meta->arg_info[i].type == POCL_ARG_TYPE_IMAGE
+               || meta->arg_info[i].type == POCL_ARG_TYPE_SAMPLER)
+        {
+          if (meta->arg_info[i].type != POCL_ARG_TYPE_SAMPLER)
+            POCL_MEM_FREE (*(void **)(arguments[i]));
+          POCL_MEM_FREE(arguments[i]);
+        }
+      else if (meta->arg_info[i].type == POCL_ARG_TYPE_POINTER)
+        {
+          POCL_MEM_FREE(arguments[i]);
+        }
+    }
+
+  if (!cmd->device->device_alloca_locals)
+    for (i = 0; i < meta->num_locals; ++i)
+      {
+        POCL_MEM_FREE (*(void **)(arguments[meta->num_args + i]));
+        POCL_MEM_FREE (arguments[meta->num_args + i]);
+      }
+  free(arguments);
+
+  pocl_release_dlhandle_cache (cmd);
 }
 
 static _cl_command_node *
@@ -258,7 +344,6 @@ static int
 tbb_scheduler_get_work ()
 {
   _cl_command_node *cmd;
-  kernel_run_command *run_cmd;
 
   POCL_FAST_LOCK (scheduler.wq_lock_fast);
   int do_exit = 0;
@@ -276,21 +361,7 @@ RETRY:
 
       if (cmd->type == CL_COMMAND_NDRANGE_KERNEL)
         {
-          run_cmd = pocl_tbb_prepare_kernel (cmd->device->data, cmd);
-#if defined(POCL_TBB_PARTITIONER_AFFINITY)
-          tbb::affinity_partitioner ap;
-#endif
-          tbb::parallel_for (tbb::blocked_range<size_t>(0, run_cmd->num_groups)
-                            , WorkGroupScheduler(run_cmd)
-#if defined(POCL_TBB_PARTITIONER_AFFINITY)
-                            , ap
-#elif defined(POCL_TBB_PARTITIONER_SIMPLE)
-                            , tbb::simple_partitioner()
-#elif defined(POCL_TBB_PARTITIONER_STATIC)
-                            , tbb::static_partitioner()
-#endif
-                            );
-          finalize_kernel_command (run_cmd);
+          pocl_tbb_run_basic (cmd);
         }
       else
         {
