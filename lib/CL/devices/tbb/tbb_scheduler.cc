@@ -103,7 +103,8 @@ tbb_scheduler_uninit ()
 
 /* push_command and push_kernel MUST use broadcast and wake up all threads,
    because commands can be for subdevices (= not all threads) */
-void tbb_scheduler_push_command (_cl_command_node *cmd)
+void
+tbb_scheduler_push_command (_cl_command_node *cmd)
 {
   POCL_FAST_LOCK (scheduler.wq_lock_fast);
   DL_APPEND (scheduler.work_queue, cmd);
@@ -113,69 +114,12 @@ void tbb_scheduler_push_command (_cl_command_node *cmd)
 
 /* HINT: continue reading from the bottom of this file up to this point */
 
-inline static void translate_wg_index_to_3d_index (kernel_run_command *k,
-                                                   unsigned index,
-                                                   size_t *index_3d,
-                                                   unsigned xy_slice,
-                                                   unsigned row_size)
+inline static void
+translate_wg_index_to_3d_index (kernel_run_command *k, unsigned index, size_t *index_3d, unsigned xy_slice, unsigned row_size)
 {
   index_3d[2] = index / xy_slice;
   index_3d[1] = (index % xy_slice) / row_size;
   index_3d[0] = (index % xy_slice) % row_size;
-}
-
-static void
-task_thread (kernel_run_command *k, int wg_index)
-{
-  pocl_kernel_metadata_t *meta = k->kernel->meta;
-
-  void *arguments[meta->num_args + meta->num_locals + 1];
-  void *arguments2[meta->num_args + meta->num_locals + 1];
-  void *local_mem = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT, scheduler.local_mem_size);
-  void *printf_buffer = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT, scheduler.printf_buf_size);
-  struct pocl_context pc;
-  /* some random value, doesn't matter as long as it's not a valid bool - to force a first FTZ setup */
-  unsigned current_ftz = 213;
-
-  setup_kernel_arg_array_with_locals (
-      (void **)&arguments, (void **)&arguments2, k, reinterpret_cast<char*> (local_mem),
-      scheduler.local_mem_size);
-  memcpy (&pc, &k->pc, sizeof(struct pocl_context));
-
-  // capacity and position already set up
-  pc.printf_buffer = reinterpret_cast<uchar*> (printf_buffer);
-  uint32_t position = 0;
-  pc.printf_buffer_position = &position;
-  assert (pc.printf_buffer != NULL);
-  assert (pc.printf_buffer_capacity > 0);
-  assert (pc.printf_buffer_position != NULL);
-
-  /* Flush to zero is only set once at start of kernel (because FTZ is
-   * a compilation option), but we need to reset rounding mode after every
-   * iteration (since it can be changed during kernel execution). */
-  unsigned flush = k->kernel->program->flush_denorms;
-  if (current_ftz != flush)
-    {
-      pocl_set_ftz (flush);
-      current_ftz = flush;
-    }
-
-  size_t gids[3];
-  unsigned slice_size = k->pc.num_groups[0] * k->pc.num_groups[1];
-  unsigned row_size = k->pc.num_groups[0];
-  translate_wg_index_to_3d_index(k, wg_index, gids, slice_size, row_size);
-
-  pocl_set_default_rm();
-  k->workgroup((uint8_t *) arguments, (uint8_t * ) & pc, gids[0], gids[1], gids[2]);
-
-  if (position > 0)
-    {
-      write (STDOUT_FILENO, pc.printf_buffer, position);
-    }
-
-  free_kernel_arg_array_with_locals ((void **)&arguments, (void **)&arguments2, k);
-  pocl_aligned_free (local_mem);
-  pocl_aligned_free (printf_buffer);
 }
 
 class WorkGroupScheduler {
@@ -183,8 +127,54 @@ class WorkGroupScheduler {
 public:
   void operator()( const tbb::blocked_range<size_t>& r ) const {
     kernel_run_command *k = my_k;
-    for( size_t i=r.begin(); i!=r.end(); ++i )
-      task_thread(k, i);
+
+    pocl_kernel_metadata_t *meta = k->kernel->meta;
+
+    void *arguments[meta->num_args + meta->num_locals + 1];
+    void *arguments2[meta->num_args + meta->num_locals + 1];
+    void *local_mem = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT, scheduler.local_mem_size);
+    void *printf_buffer = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT, scheduler.printf_buf_size);
+    struct pocl_context pc;
+    /* some random value, doesn't matter as long as it's not a valid bool - to force a first FTZ setup */
+    unsigned current_ftz = 213;
+
+    setup_kernel_arg_array_with_locals ((void **)&arguments, (void **)&arguments2, k, reinterpret_cast<char*> (local_mem), scheduler.local_mem_size);
+    memcpy (&pc, &k->pc, sizeof(struct pocl_context));
+
+    // capacity and position already set up
+    pc.printf_buffer = reinterpret_cast<uchar*> (printf_buffer);
+    uint32_t position = 0;
+    pc.printf_buffer_position = &position;
+    assert (pc.printf_buffer != NULL);
+    assert (pc.printf_buffer_capacity > 0);
+    assert (pc.printf_buffer_position != NULL);
+
+    /* Flush to zero is only set once at start of kernel (because FTZ is
+     * a compilation option), but we need to reset rounding mode after every
+     * iteration (since it can be changed during kernel execution). */
+    unsigned flush = k->kernel->program->flush_denorms;
+    if (current_ftz != flush) {
+      pocl_set_ftz (flush);
+      current_ftz = flush;
+    }
+
+    size_t gids[3];
+    unsigned slice_size = k->pc.num_groups[0] * k->pc.num_groups[1];
+    unsigned row_size = k->pc.num_groups[0];
+
+    for (size_t i=r.begin(); i!=r.end(); ++i) {
+      translate_wg_index_to_3d_index(k, i, gids, slice_size, row_size);
+      pocl_set_default_rm();
+      k->workgroup((uint8_t *) arguments, (uint8_t * ) & pc, gids[0], gids[1], gids[2]);
+    }
+
+    if (position > 0) {
+      write (STDOUT_FILENO, pc.printf_buffer, position);
+    }
+
+    free_kernel_arg_array_with_locals ((void **)&arguments, (void **)&arguments2, k);
+    pocl_aligned_free (local_mem);
+    pocl_aligned_free (printf_buffer);
   }
   WorkGroupScheduler( kernel_run_command *k ) :
       my_k(k)
