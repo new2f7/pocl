@@ -34,6 +34,7 @@
 #include <unistd.h>
 
 #include <tbb/parallel_for.h>
+#include <tbb/partitioner.h>
 
 #include "tbb_scheduler.h"
 #include "pocl_cl.h"
@@ -264,7 +265,19 @@ RETRY:
       if (cmd->type == CL_COMMAND_NDRANGE_KERNEL)
         {
           run_cmd = pocl_tbb_prepare_kernel (cmd->device->data, cmd);
-          tbb::parallel_for (tbb::blocked_range<size_t>(0, run_cmd->num_groups), WorkGroupScheduler(run_cmd));
+#if defined(POCL_TBB_PARTITIONER_AFFINITY)
+          tbb::affinity_partitioner ap;
+#endif
+          tbb::parallel_for (tbb::blocked_range<size_t>(0, run_cmd->num_groups)
+                            , WorkGroupScheduler(run_cmd)
+#if defined(POCL_TBB_PARTITIONER_AFFINITY)
+                            , ap
+#elif defined(POCL_TBB_PARTITIONER_SIMPLE)
+                            , tbb::simple_partitioner()
+#elif defined(POCL_TBB_PARTITIONER_STATIC)
+                            , tbb::static_partitioner()
+#endif
+                            );
           finalize_kernel_command (run_cmd);
         }
       else
