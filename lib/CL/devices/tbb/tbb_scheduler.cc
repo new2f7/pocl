@@ -35,6 +35,7 @@
 
 #include <tbb/parallel_for.h>
 #include <tbb/partitioner.h>
+#include <tbb/task_arena.h>
 
 #include "tbb_scheduler.h"
 #include "pocl_cl.h"
@@ -50,8 +51,12 @@ static void* pocl_tbb_driver_thread (void *p);
 typedef struct scheduler_data_
 {
   unsigned printf_buf_size;
+  void* printf_buf_global_ptr;
 
   size_t local_mem_size;
+  void* local_mem_global_ptr;
+
+  size_t num_tbb_threads;
 
   _cl_command_node *work_queue __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
   POCL_FAST_LOCK_T wq_lock_fast __attribute__ ((aligned (HOST_CPU_CACHELINE_SIZE)));
@@ -80,6 +85,17 @@ tbb_scheduler_init (cl_device_id device)
    * TODO fix this */
   scheduler.local_mem_size = device->local_mem_size << 4;
 
+  /* task_area initialization is optional and max_concurrency can be
+   * retrieved without prior initialization */
+  tbb::task_arena ta;
+  ta.initialize();
+  scheduler.num_tbb_threads = ta.max_concurrency();
+
+  /* alloc global memory for all threads
+   * TODO memory might not be aligned for all threads, just for the first one */
+  scheduler.printf_buf_global_ptr = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT, scheduler.printf_buf_size * scheduler.num_tbb_threads);
+  scheduler.local_mem_global_ptr = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT, scheduler.local_mem_size * scheduler.num_tbb_threads);
+
   /* create one meta thread to serve as an async interface thread */
   pthread_create (&scheduler.meta_thread, NULL, pocl_tbb_driver_thread, NULL);
 }
@@ -100,6 +116,9 @@ tbb_scheduler_uninit ()
   pthread_cond_destroy (&scheduler.wake_meta_thread);
 
   scheduler.meta_thread_shutdown_requested = 0;
+
+  pocl_aligned_free (scheduler.printf_buf_global_ptr);
+  pocl_aligned_free (scheduler.local_mem_global_ptr);
 }
 
 /* push_command and push_kernel MUST use broadcast and wake up all threads,
@@ -128,13 +147,12 @@ class WorkGroupScheduler {
 public:
   void operator()( const tbb::blocked_range<size_t>& r ) const {
     kernel_run_command *k = my_k;
-
     pocl_kernel_metadata_t *meta = k->kernel->meta;
-
+    const size_t my_thread_id = tbb::this_task_arena::current_thread_index();
     void *arguments[meta->num_args + meta->num_locals + 1];
     void *arguments2[meta->num_args + meta->num_locals + 1];
-    void *local_mem = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT, scheduler.local_mem_size);
-    void *printf_buffer = pocl_aligned_malloc (MAX_EXTENDED_ALIGNMENT, scheduler.printf_buf_size);
+    void *local_mem = scheduler.local_mem_global_ptr + (scheduler.local_mem_size * my_thread_id);
+    void *printf_buffer = scheduler.printf_buf_global_ptr + (scheduler.printf_buf_size * my_thread_id);
     struct pocl_context pc;
     /* some random value, doesn't matter as long as it's not a valid bool - to force a first FTZ setup */
     unsigned current_ftz = 213;
@@ -174,8 +192,6 @@ public:
     }
 
     free_kernel_arg_array_with_locals ((void **)&arguments, (void **)&arguments2, k);
-    pocl_aligned_free (local_mem);
-    pocl_aligned_free (printf_buffer);
   }
   WorkGroupScheduler( kernel_run_command *k ) :
       my_k(k)
