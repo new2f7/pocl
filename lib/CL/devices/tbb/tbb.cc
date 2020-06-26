@@ -45,6 +45,7 @@ extern "C" {
 #include <utlist.h>
 
 #include <tbb/parallel_for.h>
+#include <tbb/partitioner.h>
 
 #include "pocl_cache.h"
 #include "pocl_timing.h"
@@ -448,11 +449,11 @@ pocl_tbb_init (unsigned j, cl_device_id device, const char* parameters)
 
   device->vendor_id += j;
 
-  /* The tbb driver represents only one "compute unit" as
-     it doesn't exploit multiple hardware threads. Multiple
-     tbb devices can be still used for task level parallelism 
-     using multiple OpenCL devices. */
-  device->max_compute_units = 1;
+  /* task_area initialization is optional and max_concurrency can be
+     retrieved without prior initialization */
+  tbb::task_arena ta;
+  ta.initialize();
+  device->max_compute_units = ta.max_concurrency();
 
   return ret;
 }
@@ -565,10 +566,8 @@ pocl_tbb_write (void *data,
   memcpy ((char *)device_ptr + offset, host_ptr, size);
 }
 
-inline static void translate_wg_index_to_3d_index (unsigned index,
-                                                   size_t *index_3d,
-                                                   unsigned xy_slice,
-                                                   unsigned row_size)
+inline static void
+translate_wg_index_to_3d_index (unsigned index, size_t *index_3d, unsigned xy_slice, unsigned row_size)
 {
   index_3d[2] = index / xy_slice;
   index_3d[1] = (index % xy_slice) / row_size;
@@ -578,6 +577,7 @@ inline static void translate_wg_index_to_3d_index (unsigned index,
 class WorkGroupScheduler {
   _cl_command_node *my_k;
   void **my_arguments;
+  
 public:
   void operator()( const tbb::blocked_range<size_t>& r ) const {
     _cl_command_node *k = my_k;
@@ -589,10 +589,10 @@ public:
     
     for( size_t i=r.begin(); i!=r.end(); ++i ) {
       translate_wg_index_to_3d_index(i, gids, slice_size, row_size);
-      
       ((pocl_workgroup_func) k->command.run.wg) (arguments, (uint8_t *)&k->command.run.pc, gids[0], gids[1], gids[2]);
     }
   }
+
   WorkGroupScheduler( _cl_command_node *k, void **arguments ) :
       my_k(k), my_arguments(arguments)
   {}
@@ -614,8 +614,7 @@ pocl_tbb_run (void *data, _cl_command_node *cmd)
 
   d->current_kernel = kernel;
 
-  void **arguments = (void **)malloc (sizeof (void *)
-                                      * (meta->num_args + meta->num_locals));
+  void **arguments = (void **)malloc (sizeof (void *) * (meta->num_args + meta->num_locals));
 
   /* Process the kernel arguments. Convert the opaque buffer
      pointers to real device pointers, allocate dynamic local
@@ -705,8 +704,19 @@ pocl_tbb_run (void *data, _cl_command_node *cmd)
   pocl_set_ftz (kernel->program->flush_denorms);
 
   size_t n = pc->num_groups[0] * pc->num_groups[1] * pc->num_groups[2];
-  tbb::parallel_for (tbb::blocked_range<size_t>(0, n), WorkGroupScheduler(cmd, arguments));
-
+#if defined(POCL_TBB_PARTITIONER_AFFINITY)
+  tbb::affinity_partitioner ap;
+#endif
+  tbb::parallel_for (tbb::blocked_range<size_t>(0, n)
+                    , WorkGroupScheduler(cmd, arguments)
+#if defined(POCL_TBB_PARTITIONER_AFFINITY)
+                    , ap
+#elif defined(POCL_TBB_PARTITIONER_SIMPLE)
+                    , tbb::simple_partitioner()
+#elif defined(POCL_TBB_PARTITIONER_STATIC)
+                    , tbb::static_partitioner()
+#endif
+                    );
   pocl_restore_rm (rm);
   pocl_restore_ftz (ftz);
 

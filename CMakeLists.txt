@@ -191,6 +191,12 @@ option(ENABLE_ACCEL_DEVICE "Enable the generic hardware accelerator device drive
 
 option(ENABLE_TBB_DEVICE "Enable the Intel TBB device driver." OFF)
 
+option(POCL_TBB_PARTITIONER_AFFINITY "Use affinity partitioner for TBB parallel for scheduling." OFF)
+
+option(POCL_TBB_PARTITIONER_SIMPLE "Use simple partitioner for TBB parallel for scheduling." OFF)
+
+option(POCL_TBB_PARTITIONER_STATIC "Use static partitioner for TBB parallel for scheduling." OFF)
+
 ####
 
 # currently only works with gcc as host compiler
@@ -790,6 +796,18 @@ add_definitions(-DCL_USE_DEPRECATED_OPENCL_1_0_APIS -DCL_USE_DEPRECATED_OPENCL_1
                 -DCL_USE_DEPRECATED_OPENCL_2_1_APIS )
 
 add_definitions(-DCL_TARGET_OPENCL_VERSION=220)
+
+if(POCL_TBB_PARTITIONER_SIMPLE)
+  add_definitions(-DPOCL_TBB_PARTITIONER_SIMPLE)
+endif(POCL_TBB_PARTITIONER_SIMPLE)
+
+if(POCL_TBB_PARTITIONER_AFFINITY)
+  add_definitions(-DPOCL_TBB_PARTITIONER_AFFINITY)
+endif(POCL_TBB_PARTITIONER_AFFINITY)
+
+if(POCL_TBB_PARTITIONER_STATIC)
+  add_definitions(-DPOCL_TBB_PARTITIONER_STATIC)
+endif(POCL_TBB_PARTITIONER_STATIC)
 
 cpack_add_component("dev")
 
