@@ -85,11 +85,7 @@ tbb_scheduler_init (cl_device_id device)
    * TODO fix this */
   scheduler.local_mem_size = device->local_mem_size << 4;
 
-  /* task_area initialization is optional and max_concurrency can be
-   * retrieved without prior initialization */
-  tbb::task_arena ta;
-  ta.initialize();
-  scheduler.num_tbb_threads = ta.max_concurrency();
+  scheduler.num_tbb_threads = device->max_compute_units;
 
   /* alloc global memory for all threads
    * TODO memory might not be aligned for all threads, just for the first one */
