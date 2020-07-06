@@ -455,6 +455,17 @@ pocl_tbb_init (unsigned j, cl_device_id device, const char* parameters)
   ta.initialize();
   device->max_compute_units = ta.max_concurrency();
 
+  // DEBUG
+#if defined(POCL_TBB_PARTITIONER_AFFINITY)
+  printf("Initialized TBB_basic device using affinity partitioner\n");
+#elif defined(POCL_TBB_PARTITIONER_SIMPLE)
+  printf("Initialized TBB_basic device using simple partitioner\n");
+#elif defined(POCL_TBB_PARTITIONER_STATIC)
+  printf("Initialized TBB_basic device using static partitioner\n");
+#else
+  printf("Initialized TBB_basic device using auto partitioner (default behavior)\n");
+#endif
+
   return ret;
 }
 
