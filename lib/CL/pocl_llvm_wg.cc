@@ -23,12 +23,12 @@
    THE SOFTWARE.
 */
 
-#include "AutomaticLocals.h"
 #include "config.h"
 #include "pocl.h"
 #include "pocl_cache.h"
-#include "pocl_file_util.h"
 #include "pocl_llvm_api.h"
+#include "pocl_file_util.h"
+#include "pocl_runtime_config.h"
 
 #include <string>
 #include <map>
@@ -226,7 +226,8 @@ kernel_compiler_passes(cl_device_id device, llvm::Module *input,
   passes.push_back("workitem-handler-chooser");
   passes.push_back("mem2reg");
   passes.push_back("domtree");
-  passes.push_back("automatic-locals");
+  if (device->autolocals_to_args)
+    passes.push_back("automatic-locals");
 
   if (SPMDDevice) {
     passes.push_back("flatten-inline-all");
@@ -251,16 +252,28 @@ kernel_compiler_passes(cl_device_id device, llvm::Module *input,
     passes.push_back("uniformity");
     passes.push_back("phistoallocas");
     passes.push_back("isolate-regions");
-    passes.push_back("implicit-loop-barriers");
+    if (!pocl_is_option_set("POCL_DISABLE_IMPLICIT_LOOP_BARRIERS")) {
+      passes.push_back("implicit-loop-barriers");
+    } else {
+      std::cout << "[pocl_llvm_wg.cc] pass 'implicit-loop-barriers' disabled" << std::endl;
+    }
     passes.push_back("implicit-cond-barriers");
-    passes.push_back("loop-barriers");
+    if (!pocl_is_option_set("POCL_DISABLE_LOOP_BARRIERS")) {
+      passes.push_back("loop-barriers");
+    } else {
+      std::cout << "[pocl_llvm_wg.cc] pass 'loop-barriers' disabled" << std::endl;
+    }
     passes.push_back("barriertails");
     passes.push_back("barriers");
     passes.push_back("isolate-regions");
     passes.push_back("wi-aa");
     passes.push_back("workitemrepl");
     //passes.push_back("print-module");
-    passes.push_back("workitemloops");
+    if (!pocl_is_option_set("POCL_DISABLE_WORKITEMLOOPS")) {
+      passes.push_back("workitemloops");
+    } else {
+      std::cout << "[pocl_llvm_wg.cc] pass 'workitemloops' disabled" << std::endl;
+    }
     // Remove the (pseudo) barriers.   They have no use anymore due to the
     // work-item loop control taking care of them.
     passes.push_back("remove-barriers");
@@ -319,13 +332,17 @@ kernel_compiler_passes(cl_device_id device, llvm::Module *input,
         Builder.LoopVectorize = false;
         Builder.SLPVectorize = false;
       }
+      if (pocl_is_option_set("POCL_LLVM_DISABLE_LOOPVECTORIZE")) {
+        Builder.LoopVectorize = false;
+        std::cout << "[pocl_llvm_wg.cc] 'LoopVectorize' disabled manually" << std::endl;
+      }
+      if (pocl_is_option_set("POCL_LLVM_DISABLE_SLPVECTORIZE")) {
+        Builder.SLPVectorize = false;
+        std::cout << "[pocl_llvm_wg.cc] 'SLPVectorize' disabled manually" << std::endl;
+      }
       Builder.VerifyInput = true;
       Builder.VerifyOutput = true;
       Builder.populateModulePassManager(*Passes);
-      continue;
-    }
-    if (passes[i] == "automatic-locals") {
-      Passes->add(pocl::createAutomaticLocalsPass(device->autolocals_to_args));
       continue;
     }
 
@@ -444,11 +461,6 @@ int pocl_llvm_generate_workgroup_function_nowrite(
 #ifdef DUMP_LLVM_PASS_TIMINGS
   llvm::reportAndResetTimings();
 #endif
-
-  // Print loop vectorizer remarks if enabled.
-  if (pocl_get_bool_option("POCL_VECTORIZER_REMARKS", 0) == 1) {
-    std::cout << getDiagString();
-  }
 
   assert(Output != NULL);
   *Output = (void *)ParallelBC;
@@ -634,8 +646,8 @@ int pocl_llvm_codegen(cl_device_id Device, void *Modp, char **Output,
 #ifdef DUMP_LLVM_PASS_TIMINGS
     llvm::reportAndResetTimings();
 #endif
-    auto O = SOS.str(); // flush
-    const char *Cstr = O.data();
+    std::string O = SOS.str(); // flush
+    const char *Cstr = O.c_str();
     size_t S = O.size();
     *Output = (char *)malloc(S);
     *OutputSize = S;
