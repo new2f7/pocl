@@ -33,9 +33,9 @@ set(SUPPORTED_CXX_STD_VERSION "11")
 
 option(ENABLE_LATEST_CXX_STD "Upgrade C++ standard version to ${LATEST_KNOWN_CXX_STD_VERSION}. Required to get rid of unused variables warnings in compilers not supporting [[gnu::*]] attributes. Can bring other benefits, including performance and efficiency ones. Before a pull request build with this disabled." OFF)
 if(ENABLE_LATEST_CXX_STD)
-	set(CMAKE_CXX_STANDARD "${LATEST_KNOWN_CXX_STD_VERSION}")
+  set(CMAKE_CXX_STANDARD "${LATEST_KNOWN_CXX_STD_VERSION}")
 else()
-	set(CMAKE_CXX_STANDARD "${SUPPORTED_CXX_STD_VERSION}")
+  set(CMAKE_CXX_STANDARD "${SUPPORTED_CXX_STD_VERSION}")
 endif()
 
 # Fix behavior of CMAKE_CXX_STANDARD when targeting macOS.
@@ -154,7 +154,7 @@ set(CPACK_PACKAGE_VERSION_MAJOR "${MAJOR_VERSION}")
 set(CPACK_PACKAGE_VERSION_MINOR "${MINOR_VERSION}")
 set(CPACK_PACKAGE_VERSION "${MAJOR_VERSION}.${MINOR_VERSION}~${VERSION_SUFFIX_FIXED_TEXT}")
 if(HAVE_GIT)
-	set(CPACK_PACKAGE_VERSION "${CPACK_PACKAGE_VERSION}.${GIT_COMMIT}")
+  set(CPACK_PACKAGE_VERSION "${CPACK_PACKAGE_VERSION}.${GIT_COMMIT}")
 endif()
 
 ##################################################################################
