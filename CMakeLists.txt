@@ -189,6 +189,8 @@ option(ENABLE_HOST_CPU_DEVICES "Add host CPUs as OpenCL devices (basic and pthre
 
 option(ENABLE_ACCEL_DEVICE "Enable the generic hardware accelerator device driver." OFF)
 
+option(ENABLE_TBB_DEVICE "Enable the Intel TBB device driver." OFF)
+
 ####
 
 # currently only works with gcc as host compiler
@@ -388,9 +390,14 @@ else()
 
 endif()
 
+if(ENABLE_TBB_DEVICE)
+  # Uses  unofficial FindTBB module (https://github.com/justusc/FindTBB) in ${CMAKE_SOURCE_DIR}/cmake"
+  find_package(TBB REQUIRED)
 
-
-
+  message(STATUS "TBB_INCLUDE_DIRS ${TBB_INCLUDE_DIRS}")
+  message(STATUS "TBB_DEFINITIONS ${TBB_DEFINITIONS}")
+  message(STATUS "TBB_LIBRARIES ${TBB_LIBRARIES}")
+endif()
 
 ######################################################################################
 
@@ -1115,10 +1122,16 @@ if(ENABLE_ACCEL_DEVICE)
   set(OCL_DRIVERS "${OCL_DRIVERS} accel")
 endif()
 
+# The tbb device is implemented in C++ and requires the Intel TBB library.
+if(ENABLE_TBB_DEVICE)
+  set(BUILD_BASIC 1)
+  set(BUILD_TBB 1)
+  set(OCL_DRIVERS "${OCL_DRIVERS} tbb")
+endif()
+
 if(DEFINED EXTRA_OCL_TARGETS)
   set(OCL_TARGETS "${OCL_TARGETS} ${EXTRA_OCL_TARGETS}")
 endif()
-
 
 ####################################################################
 
