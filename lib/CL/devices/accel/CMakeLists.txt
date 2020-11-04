@@ -23,10 +23,9 @@
 #
 #=============================================================================
 
-add_compile_options("-std=c++11")
-
 if(MSVC)
   set_source_files_properties( accel.cc accel.h PROPERTIES LANGUAGE CXX )
 endif(MSVC)
 
 add_pocl_device_library(pocl-devices-accel accel.cc accel.h)
+set_target_properties(pocl-devices-accel PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
