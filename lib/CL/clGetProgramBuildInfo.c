@@ -65,23 +65,28 @@ POname(clGetProgramBuildInfo)(cl_program            program,
                            "Program was not built");
       if (program->builtin_kernel_names != NULL)
         {
+          printf("program->builtin_kernel_names != NULL\n");
           POCL_RETURN_GETINFO_STR ("");
         }
       if (program->main_build_log[0])
         {
+          printf("program->main_build_log[0]\n");
           POCL_RETURN_GETINFO_STR (program->main_build_log);
         }
       else if (program->build_log[device_i])
         {
+          printf("program->build_log[device_i]\n");
           POCL_RETURN_GETINFO_STR (program->build_log[device_i]);
         }
       else
         {
           char *build_log = pocl_cache_read_buildlog (program, device_i);
           if (build_log)
+            printf("pocl_cache_read_buildlog\n");
             POCL_RETURN_GETINFO_STR_FREE (build_log);
         }
 
+      printf("End of case CL_PROGRAM_BUILD_LOG:\n");
       POCL_RETURN_GETINFO_STR ("");
     }
   case CL_PROGRAM_BINARY_TYPE:
