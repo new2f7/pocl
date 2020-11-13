@@ -532,7 +532,7 @@ pocl_exec_command (_cl_command_node * volatile node)
           cmd->read_image.dst_row_pitch,
           cmd->read_image.dst_slice_pitch,
           cmd->read_image.dst_offset);
-      POCL_UPDATE_EVENT_COMPLETE_MSG (event, "Event CopyImageToBuffer       ");
+      POCL_UPDATE_EVENT_COMPLETE_MSG (event, "Event CopyImageToBuffer     ");
       break;
 
     case CL_COMMAND_READ_IMAGE:
@@ -566,40 +566,40 @@ pocl_exec_command (_cl_command_node * volatile node)
           cmd->write_image.src_row_pitch,
           cmd->write_image.src_slice_pitch,
           cmd->write_image.src_offset);
-      POCL_UPDATE_EVENT_COMPLETE_MSG (event, "Event CopyBufferToImage       ");
+      POCL_UPDATE_EVENT_COMPLETE_MSG (event, "Event CopyBufferToImage     ");
       break;
 
     case CL_COMMAND_WRITE_IMAGE:
-        pocl_update_event_running (event);
-        assert (dev->ops->write_image_rect);
-        dev->ops->write_image_rect (
-            dev->data,
-            event->mem_objs[0],
-            cmd->write_image.dst_mem_id,
-            cmd->write_image.src_host_ptr,
-            NULL,
-            cmd->write_image.origin,
-            cmd->write_image.region,
-            cmd->write_image.src_row_pitch,
-            cmd->write_image.src_slice_pitch,
-            cmd->write_image.src_offset);
-        POCL_UPDATE_EVENT_COMPLETE_MSG (event, "Event Write Image           ");
-        break;
+      pocl_update_event_running (event);
+      assert (dev->ops->write_image_rect);
+      dev->ops->write_image_rect (
+          dev->data,
+          event->mem_objs[0],
+          cmd->write_image.dst_mem_id,
+          cmd->write_image.src_host_ptr,
+          NULL,
+          cmd->write_image.origin,
+          cmd->write_image.region,
+          cmd->write_image.src_row_pitch,
+          cmd->write_image.src_slice_pitch,
+          cmd->write_image.src_offset);
+      POCL_UPDATE_EVENT_COMPLETE_MSG (event, "Event Write Image           ");
+      break;
 
     case CL_COMMAND_COPY_IMAGE:
-        pocl_update_event_running (event);
-        assert (dev->ops->copy_image_rect);
-        dev->ops->copy_image_rect(
-              dev->data,
-              event->mem_objs[0],
-              event->mem_objs[1],
-              cmd->copy_image.src_mem_id,
-              cmd->copy_image.dst_mem_id,
-              cmd->copy_image.src_origin,
-              cmd->copy_image.dst_origin,
-              cmd->copy_image.region);
-        POCL_UPDATE_EVENT_COMPLETE_MSG (event, "Event Copy Image            ");
-        break;
+      pocl_update_event_running (event);
+      assert (dev->ops->copy_image_rect);
+      dev->ops->copy_image_rect(
+            dev->data,
+            event->mem_objs[0],
+            event->mem_objs[1],
+            cmd->copy_image.src_mem_id,
+            cmd->copy_image.dst_mem_id,
+            cmd->copy_image.src_origin,
+            cmd->copy_image.dst_origin,
+            cmd->copy_image.region);
+      POCL_UPDATE_EVENT_COMPLETE_MSG (event, "Event Copy Image            ");
+      break;
 
     case CL_COMMAND_FILL_IMAGE:
       pocl_update_event_running (event);
@@ -708,7 +708,7 @@ pocl_exec_command (_cl_command_node * volatile node)
           assert (dev->ops->svm_map);
           dev->ops->svm_map (dev, cmd->svm_map.svm_ptr);
         }
-      POCL_UPDATE_EVENT_COMPLETE_MSG (event, "Event SVM Map              ");
+      POCL_UPDATE_EVENT_COMPLETE_MSG (event, "Event SVM Map               ");
       break;
 
     case CL_COMMAND_SVM_UNMAP:
@@ -1136,8 +1136,7 @@ pocl_setup_device_for_system_memory (cl_device_id device)
       /* global_mem_size contains the entire memory size,
        * and we need to leave some available for OS & other programs
        * this sets it to 3/4 for systems with <=7gig mem,
-       * for >7 it sets to (total-2gigs)
-       */
+       * for >7 it sets to (total-2gigs) */
       cl_ulong alloc_limit = device->global_mem_size;
       if (alloc_limit > ((cl_ulong)7 << 30))
         system_memory.total_alloc_limit = alloc_limit - ((cl_ulong)2 << 30);
@@ -1147,8 +1146,7 @@ pocl_setup_device_for_system_memory (cl_device_id device)
           system_memory.total_alloc_limit = alloc_limit - temp;
         }
 
-      system_memory.max_ever_allocated =
-          system_memory.currently_allocated = 0;
+      system_memory.max_ever_allocated = system_memory.currently_allocated = 0;
 
       /* in some cases (e.g. ARM32 pocl on ARM64 system with >4G ram),
        * global memory is correctly reported but larger than can be
@@ -1187,7 +1185,6 @@ pocl_setup_device_for_system_memory (cl_device_id device)
    * can potentially allocate the whole memory for a single buffer, unless
    * of course there are limits set at the operating system level. Of course
    * we still have to respect the OpenCL-commanded minimum */
-
   cl_ulong alloc_limit = pocl_size_ceil2_64 (device->global_mem_size / 4);
 
   if (alloc_limit < MIN_MAX_MEM_ALLOC_SIZE)
@@ -1231,10 +1228,9 @@ pocl_set_buffer_image_limits(cl_device_id device)
 
   /* We don't have hardware limitations on the buffer-backed image sizes,
    * so we set the maximum size in terms of the maximum amount of pixels
-   * that fix in max_mem_alloc_size. A single pixel can take up to 4 32-bit channels,
-   * i.e. 16 bytes.
-   */
-  size_t max_pixels = device->max_mem_alloc_size/16;
+   * that fix in max_mem_alloc_size. A single pixel can take up to 4 32-bit
+   * channels, i.e. 16 bytes. */
+  size_t max_pixels = device->max_mem_alloc_size / 16;
   if (max_pixels > device->image_max_buffer_size)
     device->image_max_buffer_size = max_pixels;
 
@@ -1242,11 +1238,10 @@ pocl_set_buffer_image_limits(cl_device_id device)
    * whose square fits in image_max_buffer_size; since the 2D image size limit
    * starts at a power of 2, it's a simple matter of doubling.
    * This is actually completely arbitrary, another equally valid option
-   * would be to have each maximum dimension match the image_max_buffer_size.
-   */
+   * would be to have each maximum dimension match the image_max_buffer_size. */
   max_pixels = device->image2d_max_width;
-  // keep doubing until we go over
-  while (max_pixels <= device->image_max_buffer_size/max_pixels)
+  // keep doubling until we go over
+  while (max_pixels <= device->image_max_buffer_size / max_pixels)
     max_pixels *= 2;
   // halve before assignment
   max_pixels /= 2;
@@ -1255,15 +1250,14 @@ pocl_set_buffer_image_limits(cl_device_id device)
 
   /* Same thing for 3D images, of course with cubes. Again, totally arbitrary. */
   max_pixels = device->image3d_max_width;
-  // keep doubing until we go over
-  while (max_pixels*max_pixels <= device->image_max_buffer_size/max_pixels)
+  // keep doubling until we go over
+  while (max_pixels*max_pixels <= device->image_max_buffer_size / max_pixels)
     max_pixels *= 2;
   // halve before assignment
   max_pixels /= 2;
   if (max_pixels > device->image3d_max_width)
-  device->image3d_max_width = device->image3d_max_height =
-    device->image3d_max_depth = max_pixels;
-
+    device->image3d_max_width = device->image3d_max_height =
+      device->image3d_max_depth = max_pixels;
 }
 
 void*
