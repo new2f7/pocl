@@ -42,6 +42,8 @@
 
 #endif
 
+//#define DEBUG_POCL_TOPOLOGY
+
 /*
  * Sets up:
  *  max_compute_units
@@ -54,6 +56,47 @@
  */
 
 #ifdef ENABLE_HWLOC
+
+#ifdef HWLOC_API_2
+#define HWLOC_IS_CACHE(type) hwloc_obj_type_is_dcache(type)
+#else
+#define HWLOC_IS_CACHE(type) (type == HWLOC_OBJ_CACHE)
+#endif
+
+/* Returns the highest private cache for a given hwloc_obj_type.
+ * Returns the highest/lowest cache if all caches are private/shared. */
+hwloc_obj_t
+find_highest_private_cache (hwloc_topology_t pocl_topology,
+                            hwloc_obj_t highest_cache,
+                            hwloc_obj_t lowest_cache,
+                            hwloc_obj_type_t type)
+{
+  /* Look at the first object of the given type. We ignore asymmetric topologies. */
+  hwloc_obj_t obj = hwloc_get_next_obj_by_type (pocl_topology, type, NULL);
+  if (obj)
+    {
+      hwloc_obj_t shared_cache = hwloc_get_shared_cache_covering_obj (pocl_topology, obj);
+      if (shared_cache)
+        {
+          if (shared_cache->depth < lowest_cache->depth)
+            {
+              /* return the highest private cache */
+              hwloc_obj_t current = shared_cache;
+              while (current->first_child)
+                {
+                  current = current->first_child;
+                  if (HWLOC_IS_CACHE(current->type))
+                    return current;
+                }
+            }
+          else /* the lowest cache is shared (shared_cache == lowest_cache) */
+            return shared_cache;
+        }
+      else /* there is no shared cache */
+        return highest_cache;
+    }
+  return NULL;
+}
 
 int
 pocl_topology_detect_device_info(cl_device_id device)
@@ -72,7 +115,6 @@ pocl_topology_detect_device_info(cl_device_id device)
 #endif
 
   /*
-
    * hwloc's OpenCL backend causes problems at the initialization stage
    * because it reloads libpocl.so via the ICD loader.
    *
@@ -124,77 +166,66 @@ pocl_topology_detect_device_info(cl_device_id device)
       hwloc_get_root_obj(pocl_topology)->memory.total_memory;
 #endif
 
-  // Try to get the number of CPU cores from topology
+  /* Get the number of hardware threads from hwloc */
   int depth = hwloc_get_type_depth(pocl_topology, HWLOC_OBJ_PU);
-  if(depth != HWLOC_TYPE_DEPTH_UNKNOWN)
-    device->max_compute_units = hwloc_get_nbobjs_by_depth(pocl_topology, depth);
+  device->max_compute_units = hwloc_get_nbobjs_by_depth(pocl_topology, depth);
 
-  /* Find information about global memory cache by looking at the first
-   * cache covering the first PU */
-  size_t shared_cache_size = 0, nonshared_cache_size = 0, cacheline_size = 0;
-  hwloc_obj_t cache = NULL;
+  /* TBD by querying cache information from hwloc */
+  size_t global_mem_cache_size = 0, global_mem_cacheline_size = 0, local_mem_size = 0;
 
-  hwloc_obj_t core
-      = hwloc_get_next_obj_by_type (pocl_topology, HWLOC_OBJ_CORE, NULL);
-  if (core)
+  hwloc_obj_t highest_cache = NULL, lowest_cache = NULL;
+  /* pointers to the caches actually used at the end */
+  hwloc_obj_t global_mem_cache = NULL, cache_as_local_mem = NULL;
+
+  hwloc_obj_t current = hwloc_get_root_obj(pocl_topology);
+  while (current->first_child)
     {
-      cache = hwloc_get_shared_cache_covering_obj (pocl_topology, core);
-      if ((cache) && (cache->attr))
+      current = current->first_child;
+      if (HWLOC_IS_CACHE(current->type))
         {
-          cacheline_size = cache->attr->cache.linesize;
-          shared_cache_size = cache->attr->cache.size;
-        }
-      else
-        core = NULL; /* fallback to L1 cache size */
-    }
-
-  hwloc_obj_t pu
-      = hwloc_get_next_obj_by_type (pocl_topology, HWLOC_OBJ_PU, NULL);
-  if (!core && pu)
-    {
-      cache = hwloc_get_shared_cache_covering_obj (pocl_topology, pu);
-      if ((cache) && (cache->attr))
-        {
-          cacheline_size = cache->attr->cache.linesize;
-          shared_cache_size = cache->attr->cache.size;
+          if (!highest_cache)
+            highest_cache = current;
+          lowest_cache = current;
         }
     }
 
-  if (cache)
+  global_mem_cache = highest_cache; /* typically L3 */
+
+  cache_as_local_mem = find_highest_private_cache (pocl_topology, highest_cache, lowest_cache, HWLOC_OBJ_CORE);
+  if (!cache_as_local_mem)
+    cache_as_local_mem = find_highest_private_cache (pocl_topology, highest_cache, lowest_cache, HWLOC_OBJ_PU);
+
+  if ((global_mem_cache) && (global_mem_cache->attr))
     {
-      /* cache should now contain the first shared cache.
-       * get the first cache with depth one larger, which
-       * should be the last non-shared cache. */
-      unsigned shared_depth = cache->depth;
-      unsigned nonshared_depth = shared_depth + 1;
-      unsigned nonshared_cachenum
-          = hwloc_get_nbobjs_by_depth (pocl_topology, nonshared_depth);
-      if (nonshared_cachenum > 0)
+      global_mem_cacheline_size = global_mem_cache->attr->cache.linesize;
+      global_mem_cache_size = global_mem_cache->attr->cache.size;
+      if (global_mem_cacheline_size && global_mem_cache_size)
         {
-          cache = hwloc_get_obj_by_depth (pocl_topology, nonshared_depth, 0);
-#ifdef HWLOC_API_2
-          if (hwloc_obj_type_is_cache(cache->type) || hwloc_obj_type_is_dcache(cache->type))
-#else
-          if (cache->type == HWLOC_OBJ_CACHE)
+          device->global_mem_cache_type = 0x2; // CL_READ_WRITE_CACHE, without including all of CL/cl.h
+          device->global_mem_cacheline_size = global_mem_cacheline_size;
+          device->global_mem_cache_size = global_mem_cache_size;
+#ifdef DEBUG_POCL_TOPOLOGY
+          printf("detected global_mem_cache_size: %lu\n", device->global_mem_cache_size);
 #endif
-            {
-              nonshared_cache_size = cache->attr->cache.size;
-            }
         }
     }
 
-  if (shared_cache_size > 0 && cacheline_size > 0)
+  if ((cache_as_local_mem) && (cache_as_local_mem->attr))
     {
-      device->global_mem_cache_type
-          = 0x2; // CL_READ_WRITE_CACHE, without including all of CL/cl.h
-      device->global_mem_cacheline_size = cacheline_size;
-      device->global_mem_cache_size = shared_cache_size;
+      local_mem_size = cache_as_local_mem->attr->cache.size;
+      if (local_mem_size)
+        {
+          /* divide by the number of PUs below the selected cache */
+          hwloc_const_cpuset_t set = cache_as_local_mem->cpuset;
+          unsigned num_pus = hwloc_get_nbobjs_inside_cpuset_by_type (pocl_topology, set, HWLOC_OBJ_PU);
+          device->local_mem_size = local_mem_size / num_pus;
+          device->max_constant_buffer_size =  local_mem_size / num_pus;
+#ifdef DEBUG_POCL_TOPOLOGY
+          printf("detected local_mem_size: %lu\n", device->local_mem_size);
+#endif
+        }
     }
-  if (nonshared_cache_size > 0)
-    {
-      device->local_mem_size = nonshared_cache_size;
-      device->max_constant_buffer_size = nonshared_cache_size;
-    }
+
   // Destroy topology object and return
 exit_destroy:
   hwloc_topology_destroy (pocl_topology);
@@ -202,11 +233,12 @@ exit_destroy:
 
 }
 
-// #ifdef HWLOC
+// #ifdef ENABLE_HWLOC
 #elif defined(__linux__) || defined(__ANDROID__)
 
 #define L3_CACHE_SIZE "/sys/devices/system/cpu/cpu0/cache/index3/size"
 #define L2_CACHE_SIZE "/sys/devices/system/cpu/cpu0/cache/index2/size"
+#define L1_CACHE_SIZE "/sys/devices/system/cpu/cpu0/cache/index1/size"
 #define CPUS "/sys/devices/system/cpu/possible"
 #define MEMINFO "/proc/meminfo"
 
@@ -217,16 +249,21 @@ pocl_topology_detect_device_info (cl_device_id device)
   device->global_mem_cache_type
       = 0x2; // CL_READ_WRITE_CACHE, without including all of CL/cl.h
 
-  /* global mem cache size */
-
   char *content;
   uint64_t filesize;
 
+  /* global_mem_cache_size and local_mem_size */
   if (pocl_read_file (L3_CACHE_SIZE, &content, &filesize) == 0)
     {
       long val = atol (content);
       device->global_mem_cache_size = val * 1024;
       POCL_MEM_FREE (content);
+      if (pocl_read_file (L2_CACHE_SIZE, &content, &filesize) == 0)
+        {
+          long val = atol (content);
+          device->local_mem_size = val * 1024;
+          POCL_MEM_FREE (content);
+        }
     }
   else
     {
@@ -235,6 +272,12 @@ pocl_topology_detect_device_info (cl_device_id device)
           long val = atol (content);
           device->global_mem_cache_size = val * 1024;
           POCL_MEM_FREE (content);
+          if (pocl_read_file (L1_CACHE_SIZE, &content, &filesize) == 0)
+            {
+              long val = atol (content);
+              device->local_mem_size = val * 1024;
+              POCL_MEM_FREE (content);
+            }
         }
       else
         {

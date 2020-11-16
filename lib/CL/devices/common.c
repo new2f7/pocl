@@ -1229,6 +1229,13 @@ pocl_set_buffer_image_limits(cl_device_id device)
       device->max_constant_buffer_size = s;
     }
 
+  /* The OpenCL spec requires a minimum value of 32 KiB. */
+  if (device->local_mem_size < 32UL * 1024)
+    device->local_mem_size = 32UL * 1024;
+  /* The OpenCL spec requires a minimum value of 64 KiB. */
+  if (device->max_constant_buffer_size < 64UL * 1024)
+    device->max_constant_buffer_size = 64UL * 1024;
+
   /* We don't have hardware limitations on the buffer-backed image sizes,
    * so we set the maximum size in terms of the maximum amount of pixels
    * that fix in max_mem_alloc_size. A single pixel can take up to 4 32-bit channels,
