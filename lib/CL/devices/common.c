@@ -1134,11 +1134,11 @@ pocl_setup_device_for_system_memory (cl_device_id device)
   if (system_memory.total_alloc_limit == 0)
   {
       /* global_mem_size contains the entire memory size,
-       * and we need to leave some available for OS & other programs
-       * this sets it to 3/4 for systems with <=7gig mem,
-       * for >7 it sets to (total-2gigs) */
+       * but we need to leave some memory available for the OS & other programs.
+       * Set it to (total - 2) GiB for systems with >8 GiB memory
+       * and to (total * 0.75) GiB for systems with <=8 GiB memory. */
       cl_ulong alloc_limit = device->global_mem_size;
-      if (alloc_limit > ((cl_ulong)7 << 30))
+      if (alloc_limit > ((cl_ulong)8 << 30))
         system_memory.total_alloc_limit = alloc_limit - ((cl_ulong)2 << 30);
       else
         {
@@ -1148,7 +1148,7 @@ pocl_setup_device_for_system_memory (cl_device_id device)
 
       system_memory.max_ever_allocated = system_memory.currently_allocated = 0;
 
-      /* in some cases (e.g. ARM32 pocl on ARM64 system with >4G ram),
+      /* in some cases (e.g. ARM32 pocl on ARM64 system with >4 GiB RAM),
        * global memory is correctly reported but larger than can be
        * used; limit to pointer size */
       if (system_memory.total_alloc_limit > UINTPTR_MAX)
