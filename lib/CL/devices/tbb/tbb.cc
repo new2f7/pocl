@@ -47,6 +47,7 @@ extern "C" {
 #include <tbb/blocked_range3d.h>
 #include <tbb/parallel_for.h>
 #include <tbb/partitioner.h>
+#include <tbb/task_arena.h>
 
 #include "pocl_cache.h"
 #include "pocl_timing.h"
