@@ -189,11 +189,11 @@ pocl_topology_detect_device_info(cl_device_id device)
         }
     }
 
-  global_mem_cache = highest_cache; /* typically L3 */
+  global_mem_cache = find_highest_private_cache (pocl_topology, highest_cache, lowest_cache, HWLOC_OBJ_CORE);
+  if (!global_mem_cache)
+    global_mem_cache = find_highest_private_cache (pocl_topology, highest_cache, lowest_cache, HWLOC_OBJ_PU);
 
-  cache_as_local_mem = find_highest_private_cache (pocl_topology, highest_cache, lowest_cache, HWLOC_OBJ_CORE);
-  if (!cache_as_local_mem)
-    cache_as_local_mem = find_highest_private_cache (pocl_topology, highest_cache, lowest_cache, HWLOC_OBJ_PU);
+  cache_as_local_mem = lowest_cache;
 
   if ((global_mem_cache) && (global_mem_cache->attr))
     {
@@ -236,7 +236,6 @@ exit_destroy:
 // #ifdef ENABLE_HWLOC
 #elif defined(__linux__) || defined(__ANDROID__)
 
-#define L3_CACHE_SIZE "/sys/devices/system/cpu/cpu0/cache/index3/size"
 #define L2_CACHE_SIZE "/sys/devices/system/cpu/cpu0/cache/index2/size"
 #define L1_CACHE_SIZE "/sys/devices/system/cpu/cpu0/cache/index1/size"
 #define CPUS "/sys/devices/system/cpu/possible"
@@ -253,12 +252,12 @@ pocl_topology_detect_device_info (cl_device_id device)
   uint64_t filesize;
 
   /* global_mem_cache_size and local_mem_size */
-  if (pocl_read_file (L3_CACHE_SIZE, &content, &filesize) == 0)
+  if (pocl_read_file (L2_CACHE_SIZE, &content, &filesize) == 0)
     {
       long val = atol (content);
       device->global_mem_cache_size = val * 1024;
       POCL_MEM_FREE (content);
-      if (pocl_read_file (L2_CACHE_SIZE, &content, &filesize) == 0)
+      if (pocl_read_file (L1_CACHE_SIZE, &content, &filesize) == 0)
         {
           long val = atol (content);
           device->local_mem_size = val * 1024;
@@ -267,17 +266,12 @@ pocl_topology_detect_device_info (cl_device_id device)
     }
   else
     {
-      if (pocl_read_file (L2_CACHE_SIZE, &content, &filesize) == 0)
+      if (pocl_read_file (L1_CACHE_SIZE, &content, &filesize) == 0)
         {
           long val = atol (content);
           device->global_mem_cache_size = val * 1024;
+          device->local_mem_size = val * 1024;
           POCL_MEM_FREE (content);
-          if (pocl_read_file (L1_CACHE_SIZE, &content, &filesize) == 0)
-            {
-              long val = atol (content);
-              device->local_mem_size = val * 1024;
-              POCL_MEM_FREE (content);
-            }
         }
       else
         {
