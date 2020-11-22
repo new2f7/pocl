@@ -1218,17 +1218,6 @@ pocl_set_buffer_image_limits(cl_device_id device)
   assert (device->max_compute_units > 0);
   assert (device->max_mem_alloc_size > 0);
 
-  /* these should be ideally setup by hwloc or proc/cpuinfo;
-   * if not, set them to some reasonable values
-   */
-  if (device->local_mem_size == 0)
-    {
-      cl_ulong s = pocl_size_ceil2_64 (device->global_mem_size / 1024);
-      s = min (s, 512UL * 1024);
-      device->local_mem_size = s;
-      device->max_constant_buffer_size = s;
-    }
-
   /* The OpenCL spec requires a minimum value of 32 KiB. */
   if (device->local_mem_size < 32UL * 1024)
     device->local_mem_size = 32UL * 1024;
