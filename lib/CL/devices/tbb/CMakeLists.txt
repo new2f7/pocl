@@ -24,10 +24,10 @@
 #=============================================================================
 
 if(MSVC)
-  set_source_files_properties( tbb.h tbb.cc tbb_scheduler.cc tbb_utils.cc PROPERTIES LANGUAGE CXX )
+  set_source_files_properties( tbb.h tbb.cc PROPERTIES LANGUAGE CXX )
 endif(MSVC)
 
-add_pocl_device_library(pocl-devices-tbb tbb.h tbb.cc tbb_scheduler.cc tbb_utils.cc)
+add_pocl_device_library(pocl-devices-tbb tbb.h tbb.cc)
 target_include_directories(pocl-devices-tbb PRIVATE ${TBB_INCLUDE_DIRS})
 target_compile_definitions(pocl-devices-tbb PRIVATE ${TBB_DEFINITIONS})
 target_link_libraries(pocl-devices-tbb PRIVATE pocl-devices-basic ${TBB_LIBRARIES})
