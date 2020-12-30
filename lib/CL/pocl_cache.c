@@ -418,7 +418,7 @@ build_program_compute_hash (cl_program program, unsigned device_i,
                      strlen(LLVM_VERSION));
     pocl_SHA1_Update(&hash_ctx, (uint8_t*) POCL_BUILD_TIMESTAMP,
                      strlen(POCL_BUILD_TIMESTAMP));
-    pocl_SHA1_Update(&hash_ctx, (const uint8_t *)POCL_KERNELLIB_SHA1,
+    pocl_SHA1_Update(&hash_ctx, (const uint8_t *) POCL_KERNELLIB_SHA1,
                      strlen(POCL_KERNELLIB_SHA1));
     /*devices may include their own information to hash */
     if (device->ops->build_hash)
