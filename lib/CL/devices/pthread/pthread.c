@@ -152,7 +152,7 @@ pocl_pthread_init (unsigned j, cl_device_id device, const char* parameters)
 
   device->on_host_queue_props
       = CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE;
-  
+
   /* full memory consistency model for atomic memory and fence operations
   except CL_DEVICE_ATOMIC_SCOPE_ALL_DEVICES. see 
   https://www.khronos.org/registry/OpenCL/specs/3.0-unified/html/OpenCL_API.html#opencl-3.0-backwards-compatibility*/
@@ -169,9 +169,9 @@ pocl_pthread_init (unsigned j, cl_device_id device, const char* parameters)
                                        | CL_DEVICE_ATOMIC_SCOPE_DEVICE;
 
   /* hwloc probes OpenCL device info at its initialization in case
-     the OpenCL extension is enabled. This causes to printout 
+     the OpenCL extension is enabled. This causes to printout
      an unimplemented property error because hwloc is used to
-     initialize global_mem_size which it is not yet. Just put 
+     initialize global_mem_size which it is not yet. Just put
      a nonzero there for now. */
   device->global_mem_size = 1;
   err = pocl_topology_detect_device_info (device);
@@ -365,7 +365,8 @@ pocl_pthread_update_event (cl_device_id device, cl_event event)
     }
 }
 
-void pocl_pthread_wait_event (cl_device_id device, cl_event event)
+void
+pocl_pthread_wait_event (cl_device_id device, cl_event event)
 {
   struct event_data *e_d = event->data;
 
@@ -378,7 +379,8 @@ void pocl_pthread_wait_event (cl_device_id device, cl_event event)
 }
 
 
-void pocl_pthread_free_event_data (cl_event event)
+void
+pocl_pthread_free_event_data (cl_event event)
 {
   assert(event->data != NULL);
   free(event->data);
