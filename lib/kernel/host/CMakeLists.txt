@@ -214,16 +214,16 @@ sleef-pocl/floor.cl
 sleef-pocl/fma.cl
 sleef-pocl/fmax.cl
 sleef-pocl/fmin.cl
-sleef-pocl/expfrexp.cl
-sleef-pocl/frfrexp.cl
-sleef-pocl/frexp.cl
+libclc-pocl/expfrexp.cl
+libclc-pocl/frfrexp.cl
+libclc-pocl/frexp.cl
 sleef-pocl/hypot.cl
 sleef-pocl/ilogb.cl
 sleef-pocl/ldexp.cl
 sleef-pocl/lgamma.cl
 sleef-pocl/lgamma_r.cl
 sleef-pocl/log10.cl
-sleef-pocl/log1p.cl
+sleef-pocl/log1p.cl # present in libclc-pocl, but produces build errors
 sleef-pocl/log.cl
 sleef-pocl/modf.cl
 sleef-pocl/native_cos.cl
