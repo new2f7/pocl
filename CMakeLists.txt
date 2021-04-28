@@ -199,6 +199,8 @@ option(ENABLE_HOST_CPU_DEVICE_CL20 "Enable reporting OpenCL 2.0 for the CPU devi
 
 option(ENABLE_ACCEL_DEVICE "Enable the generic hardware accelerator device driver." OFF)
 
+option(ENABLE_TBB_DEVICE "Enable the Intel TBB device driver." OFF)
+
 ####
 
 # currently only works with gcc as host compiler
@@ -403,9 +405,17 @@ else()
 
 endif()
 
+if(ENABLE_TBB_DEVICE)
+  # Uses  unofficial FindTBB module (https://github.com/justusc/FindTBB) in ${CMAKE_SOURCE_DIR}/cmake"
+  find_package(TBB REQUIRED)
 
+  message(STATUS "TBB_INCLUDE_DIRS ${TBB_INCLUDE_DIRS}")
+  message(STATUS "TBB_DEFINITIONS ${TBB_DEFINITIONS}")
+  message(STATUS "TBB_LIBRARIES ${TBB_LIBRARIES}")
 
-
+  # The tbb device depends on the pthread device which depends on the basic device. ENABLE_HOST_CPU_DEVICES enables both.
+  set(ENABLE_HOST_CPU_DEVICES 1)
+endif()
 
 ######################################################################################
 
@@ -1093,6 +1103,11 @@ if(ENABLE_HOST_CPU_DEVICES)
   set(BUILD_PTHREAD 1)
 endif()
 
+if(ENABLE_TBB_DEVICE)
+  set(BUILD_TBB 1)
+  set(OCL_DRIVERS "${OCL_DRIVERS} tbb")
+endif()
+
 # The accel device could be built by default, but it's implemented in C++,
 # thus requires a C++ compiler, so let's not.
 if(ENABLE_ACCEL_DEVICE)
@@ -1104,7 +1119,6 @@ endif()
 if(DEFINED EXTRA_OCL_TARGETS)
   set(OCL_TARGETS "${OCL_TARGETS} ${EXTRA_OCL_TARGETS}")
 endif()
-
 
 ####################################################################
 

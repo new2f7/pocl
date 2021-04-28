@@ -1,0 +1,42 @@
+==========
+TBB device
+==========
+
+The TBB device uses the Intel Threading Building Blocks open source (Apache 2.0)
+library for scheduling and presents an alternative to the pthread device.
+
+Contrary to the pthread device, the TBB device scheduling characteristics can be
+fine tuned with environment variables (see below).
+
+Building pocl with TBB
+----------------------
+
+1) Install prerequisites
+~~~~~~~~~~~~~~~~~~~~~~~~
+  The Intel Threading Building Blocks library must be available on your system.
+
+  pocl uses a `third party CMake module <https://github.com/justusc/FindTBB>`_
+  to locate the library on your system.
+
+2) Build pocl
+~~~~~~~~~~~~~
+  To enable the TBB device, add ``-DENABLE_TBB_DEVICE=1`` to your CMake
+  configuration command line.
+
+  If CMake has trouble locating the TBB library, try specifying
+  ``TBB_ROOT_DIR``, ``TBB_INCLUDE_DIR`` and ``TBB_LIBRARY``.
+  See the `related documentation <https://github.com/justusc/FindTBB>`_ for
+  further help.
+
+3) Configuration
+~~~~~~~~~~~~~~~~
+  Use ``POCL_DEVICES=tbb`` to select the TBB device.
+
+  Optionally, set the ``POCL_TBB_PARTITIONER`` environment variable to one of
+  ``affinity``,``auto``,``simple``,``static`` to select a partitioner. If no
+  partitioner is selected, the TBB library will select the auto partitioner by
+  default. More information can be found in the
+  `related documentation <https://www.threadingbuildingblocks.org/docs/help/reference/algorithms/partitioners.html>`_.
+
+  Use optionally ``POCL_TBB_GRAIN_SIZE`` to specify a grain size for all dimensions. More information can be found in the
+  `related documentation <https://www.threadingbuildingblocks.org/docs/help/tbb_userguide/Controlling_Chunking.html>`_.
