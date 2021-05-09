@@ -834,7 +834,8 @@ endif()
 
 if(NOT DEFINED DEFAULT_ENABLE_ICD)
 
-if (MSVC)
+if(MSVC)
+
   message(STATUS "Building ICD not yet supported on Windows.")
   set(DEFAULT_ENABLE_ICD 0 CACHE INTERNAL "Going to use ICD loader")
 
@@ -843,7 +844,7 @@ else()
   # pkg-config doesn't work with cross-compiling
   pkg_check_modules(OCL_ICD ocl-icd>=1.3)
 
-  if (NOT OCL_ICD_FOUND)
+  if(NOT OCL_ICD_FOUND)
     find_path(OCL_ICD_INCLUDE_DIR
       NAMES
         ocl_icd.h

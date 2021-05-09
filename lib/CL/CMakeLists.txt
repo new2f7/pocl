@@ -35,7 +35,8 @@ endif()
 include_directories(AFTER "devices" "." "../llvmopencl")
 
 ################################################################################
-if (MSVC)
+
+if(MSVC)
   set(POCL_PUBLIC_LINK_LIST ${Pthreads_LIBRARIES} ${LTTNG_UST_LDFLAGS})
 else()
   set(POCL_PUBLIC_LINK_LIST "${DL_LIB}" ${CMAKE_THREAD_LIBS_INIT} ${LTTNG_UST_LDFLAGS} ${LIBMATH})
@@ -218,9 +219,9 @@ harden("libpocl_unlinked_objs")
 
 #################################################################
 
-if (POCL_DEVICES_LINK_LIST)
+if(POCL_DEVICES_LINK_LIST)
   list(INSERT POCL_PUBLIC_LINK_LIST 0 ${POCL_DEVICES_LINK_LIST})
-endif ()
+endif()
 
 # see lib/CMakeLists.txt
 set(POCL_TRANSITIVE_LIBS ${POCL_PRIVATE_LINK_LIST} PARENT_SCOPE)
