@@ -91,6 +91,10 @@ include_directories(${LLVM_INCLUDE_DIRS})
 include_directories(../CL)
 include_directories(../CL/devices)
 
+if(ENABLE_ICD)
+  include_directories(${OCL_ICD_INCLUDE_DIR})
+endif()
+
 if(MSVC)
   set_source_files_properties( ${LLVMPASSES_SOURCES} PROPERTIES LANGUAGE CXX )
 endif(MSVC)

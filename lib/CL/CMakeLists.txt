@@ -34,6 +34,10 @@ endif()
 
 include_directories(AFTER "devices" "." "../llvmopencl")
 
+if(ENABLE_ICD)
+  include_directories(${OCL_ICD_INCLUDE_DIR})
+endif()
+
 ################################################################################
 if (MSVC)
   set(POCL_PUBLIC_LINK_LIST ${Pthreads_LIBRARIES} ${LTTNG_UST_LDFLAGS})

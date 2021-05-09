@@ -869,7 +869,7 @@ else()
     set(OPENCL_FOUND 1 CACHE INTERNAL "opencl ICD/library found")
     # duh, why doesn't ocl-icd set this in its .pc file ??
     separate_arguments(OCL_LDFLAGS UNIX_COMMAND "${OCL_ICD_LDFLAGS}")
-    list(APPEND OCL_LDFLAGS "OpenCL")
+    list(APPEND OCL_LDFLAGS "${OCL_ICD_LIBRARIES}/libOpenCL.so")
     set(OPENCL_LIBRARIES "${OCL_LDFLAGS}" CACHE INTERNAL "opencl ICD/library link flags")
     set(DEFAULT_ENABLE_ICD 1 CACHE INTERNAL "ICD loader availability")
 
@@ -904,9 +904,9 @@ else()
 
   endif()
 
-endif()
+endif() # if(MSVC) else()
 
-endif()
+endif() # if(NOT DEFINED DEFAULT_ENABLE_ICD)
 
 setup_cached_var(ENABLE_ICD "Using an ICD loader"
   "Requested build with icd, but ICD loader not found! some examples will not work.."
