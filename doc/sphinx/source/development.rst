@@ -136,8 +136,8 @@ used to run the pocl test suite:
    it. Copy the OpenCL headers to inc/CL like instructed in
    inc/README.txt.
 #. Apply a patch from the pocl checkout::
-     cd icd
 
+     cd icd
      patch -p1 < ~/pocl/tools/patches/khronos-icd-loader.patch
 
 #. Build it with 'make'.
