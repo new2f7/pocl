@@ -209,8 +209,8 @@ pocl_basic_init (unsigned j, cl_device_id device, const char* parameters)
   pocl_cpuinfo_detect_device_info(device);
   pocl_set_buffer_image_limits(device);
 
-  if (device->vendor_id == 0)
-    device->vendor_id = CL_KHRONOS_VENDOR_ID_POCL;
+  device->vendor = "PoCL";
+  device->vendor_id = CL_KHRONOS_VENDOR_ID_POCL;
 
   /* The basic driver represents only one "compute unit" as
      it doesn't exploit multiple hardware threads. Multiple
